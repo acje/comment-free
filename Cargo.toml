@@ -1,24 +1,40 @@
 [package]
 name = "comment-free"
 version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-authors.workspace = true
+description = "Rust source comment hygiene tool: strips non-doc comments, normalises rustdoc link idioms, lints doc-comment length"
+edition = "2024"
+rust-version = "1.98"
+license = "Apache-2.0 OR MIT"
+homepage = "https://github.com/Mattilsynet/comment-free"
+repository = "https://github.com/Mattilsynet/comment-free"
+readme = "README.md"
+authors = ["Mattilsynet"]
 publish = false
 
-[lints]
-workspace = true
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
 
 [dependencies]
-clap.workspace = true
-thiserror.workspace = true
-syn = { workspace = true, features = ["parsing", "visit", "visit-mut"] }
-quote.workspace = true
-proc-macro2 = { workspace = true, features = ["span-locations"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+syn = { version = "2", features = [
+    "full",
+    "extra-traits",
+    "parsing",
+    "visit",
+    "visit-mut",
+] }
+quote = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
 ra-ap-rustc_lexer = "=0.174.0"
 walkdir = "2"
 similar = "3"
 
 [dev-dependencies]
-tempfile.workspace = true
+tempfile = "3"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+overflow-checks = true

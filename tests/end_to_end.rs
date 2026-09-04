@@ -1972,3 +1972,16 @@ fn rewrite_record_grammar_constant_documents_record() {
 fn rewrite_record_version_constant_is_one() {
     assert_eq!(comment_free::REWRITE_RECORD_VERSION, 1);
 }
+#[test]
+fn version_flag_exits_zero_and_prints_crate_version() {
+    let out = Command::new(bin())
+        .arg("--version")
+        .output()
+        .expect("failed to spawn comment-free");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "exit {:?}", out.status.code());
+    assert!(
+        stdout.contains(env!("CARGO_PKG_VERSION")),
+        "expected --version output to contain the crate version:\n{stdout}"
+    );
+}

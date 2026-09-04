@@ -12,6 +12,7 @@ use walkdir::WalkDir;
 #[derive(Parser, Debug)]
 #[command(
     name = "comment-free",
+    version,
     about = "Doc-comment linter and byte-preserving rustdoc-link rewriter for Rust crates. \
              Default mode lints doc-comment word budget. \
              `--rewrite` strips non-doc `//` and `/* */` comments via the rustc lexer (preserving doc comments, AUTO-TRAIT-POLICY markers, and `// SAFETY:` lines) and canonicalises Rust intra-doc-link idioms in doc-comment payloads. Both passes are byte-preserving outside their targets.",

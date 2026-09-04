@@ -29,7 +29,7 @@ Use `--dry-run` to inspect the unified diff before writing files.
 ## Install
 
 ```sh
-cargo +1.98 install --git https://github.com/Mattilsynet/comment-free --locked comment-free
+cargo +1.98 install --git https://github.com/acje/comment-free --locked comment-free
 ```
 
 The `+1.98` is load-bearing. `cargo install --git` **ignores the source

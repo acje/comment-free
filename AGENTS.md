@@ -44,7 +44,7 @@ cargo audit
 Installed, not vendored:
 
 ```sh
-cargo +1.98 install --git https://github.com/Mattilsynet/comment-free --locked comment-free
+cargo +1.98 install --git https://github.com/acje/comment-free --locked comment-free
 ```
 
 `cargo install --git` ignores this repo's `rust-toolchain.toml` and

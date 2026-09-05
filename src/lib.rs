@@ -2897,32 +2897,32 @@ fn is_reference_definition(line: &str) -> bool {
     };
     rest[close + 1..].starts_with(':')
 }
+fn char_len_at(line: &str, start: usize) -> usize {
+    line[start..].chars().next().map_or(1, char::len_utf8)
+}
 fn rewrite_line_links(line: &str, out: &mut String) {
-    let mut chars = line.char_indices().peekable();
+    let bytes = line.as_bytes();
     let mut in_code_span = false;
-    while let Some(&(i, ch)) = chars.peek() {
-        if ch == '`' {
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
             in_code_span = !in_code_span;
             out.push('`');
-            chars.next();
+            i += 1;
             continue;
         }
-        if in_code_span || ch != '[' {
-            out.push(ch);
-            chars.next();
+        if in_code_span || bytes[i] != b'[' {
+            let step = char_len_at(line, i);
+            out.push_str(&line[i..i + step]);
+            i += step;
             continue;
         }
         if let Some((shape, consumed)) = parse_link_at(line, i) {
             emit_link(out, &shape);
-            while let Some(&(j, _)) = chars.peek() {
-                if j >= i + consumed {
-                    break;
-                }
-                chars.next();
-            }
+            i += consumed;
         } else {
             out.push('[');
-            chars.next();
+            i += 1;
         }
     }
 }

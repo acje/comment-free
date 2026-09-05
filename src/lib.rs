@@ -1412,10 +1412,10 @@ fn is_doc_path(path: &Path, root: &Path) -> bool {
             return true;
         }
     }
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        let stem_uc = stem.to_ascii_uppercase();
+    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+        let name_uc = name.to_ascii_uppercase();
         for known in BARE_DOC_STEMS {
-            if stem_uc == *known {
+            if name_uc == *known {
                 return true;
             }
         }
@@ -4088,6 +4088,20 @@ mod doc_path_tests {
             root
         ));
         assert!(!is_doc_path(Path::new("/proj/src/doc/util.rs"), root));
+    }
+    #[test]
+    fn bare_doc_stem_does_not_match_a_non_doc_extension() {
+        let root = Path::new("");
+        assert!(is_doc_path(Path::new("README"), root));
+        assert!(is_doc_path(Path::new("LICENSE"), root));
+        assert!(is_doc_path(Path::new("NOTICE"), root));
+        assert!(!is_doc_path(Path::new("README.rs"), root));
+        assert!(!is_doc_path(Path::new("LICENSE.rs"), root));
+        assert!(!is_doc_path(Path::new("NOTICE.toml"), root));
+        assert!(!is_doc_path(Path::new("COPYING.rs"), root));
+        assert!(!is_doc_path(Path::new("CHANGELOG.rs"), root));
+        assert!(is_doc_path(Path::new("README.md"), root));
+        assert!(is_doc_path(Path::new("CHANGELOG.markdown"), root));
     }
 }
 #[cfg(test)]

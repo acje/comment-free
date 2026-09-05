@@ -95,23 +95,36 @@ One per item whose doc set the linter could not decide, on stdout.
 {"record":"doc_lint_undecided","v":2,"outcome":"configuration_dependent","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":40,"budget":80,"words_all_cfgs":95,"fail_closed":false}
 ```
 
-`cfg_attr` doc payloads are held apart from the unconditional doc set,
-because their predicates are not resolved by this tool and two of them
-may be mutually exclusive — a `unix` and a `windows` doc set are never
-both present in one build. Summing them would manufacture a word count
-no build exposes.
+`cfg_attr` doc payloads — nested `cfg_attr` included — are held apart
+from the unconditional doc set, because their predicates are not
+resolved by this tool and two of them may be mutually exclusive — a
+`unix` and a `windows` doc set are never both present in one build.
+Summing them would manufacture a word count no build exposes.
+
+A predicate built only from the boolean constants `all()` and `any()`
+is folded: `cfg_attr(all(), doc = ...)` applies in every configuration
+and counts as unconditional, `cfg_attr(any(), doc = ...)` applies in
+none and is dropped. Composition through `not(...)` and through nesting
+is folded the same way. Anything naming a real `cfg` key stays
+unresolved.
 
 `words` is therefore the count of the unconditional doc set alone, which
 every configuration carries, and `words_all_cfgs` the count with every
-`cfg_attr` doc payload active. This record is emitted when `words` is
-within budget and `words_all_cfgs` is not: the item is over budget for
-some configurations and within it for others.
+`cfg_attr` doc payload active. The `words_all_cfgs` text is an upper
+bound, **not** an attainable build: it may carry fence markers from
+payloads that are never both present. It therefore never establishes a
+clean verdict. This record is emitted whenever an unresolved payload
+remains and no finding is provable from the unconditional set.
+
+A finding requires that the unconditional set alone be over budget in
+every configuration. When a conditional payload opens or closes a code
+fence, the fence state at the unconditional prose is itself unresolved,
+so the item is reported here rather than as a finding.
 
 It is **not** a finding. It does not increment the `findings` counter and
 does not drive exit code 4; it increments `undecided` in `lint_summary`.
-An item whose unconditional doc set alone exceeds the budget is over
-budget in every configuration and is reported as an ordinary
-`doc_lint_finding`.
+A run with `undecided` above zero has not established that the tree is
+clean, even at exit 0.
 
 `fail_closed` reports the balance state of the `words_all_cfgs` count.
 

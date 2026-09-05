@@ -953,6 +953,125 @@ fn mutually_exclusive_cfg_docs_are_undecided_not_a_finding() {
     assert_eq!(summary.number("errors"), 0);
 }
 #[test]
+fn a_conditional_fence_around_unconditional_prose_is_undecided_not_clean() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!(
+        "#[cfg_attr(unix, doc = \" ```\")]\n\
+         #[doc = \"{long}\"]\n\
+         #[cfg_attr(unix, doc = \" ```\")]\n\
+         pub fn f() {{}}\n"
+    );
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        records_named(&stdout, "doc_lint_finding").is_empty(),
+        "a unix build fences the prose, so no finding holds everywhere:\n{stdout}"
+    );
+    let undecided = one_record(&stdout, "doc_lint_undecided");
+    assert_eq!(undecided.text("outcome"), "configuration_dependent");
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(
+        summary.number("undecided"),
+        1,
+        "a conditional fence must never be reported clean:\n{stderr}"
+    );
+    assert_eq!(summary.number("findings"), 0);
+}
+#[test]
+fn a_trivially_true_cfg_attr_doc_reaches_exit_four() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#[cfg_attr(all(), doc = \"{long}\")]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "cfg_attr(all(), ...) applies the doc unconditionally\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.number("words"), 90);
+}
+#[test]
+fn a_nested_trivially_true_cfg_attr_doc_reaches_exit_four() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#[cfg_attr(all(), cfg_attr(all(), doc = \"{long}\"))]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a nested always-true cfg_attr doc is unconditional\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.number("words"), 90);
+}
+#[test]
+fn a_nested_conditional_cfg_attr_doc_is_undecided_not_clean() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#[cfg_attr(unix, cfg_attr(windows, doc = \"{long}\"))]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        records_named(&stdout, "doc_lint_finding").is_empty(),
+        "{stdout}"
+    );
+    let undecided = one_record(&stdout, "doc_lint_undecided");
+    assert_eq!(undecided.number("words_all_cfgs"), 90);
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(
+        summary.number("undecided"),
+        1,
+        "a nested conditional doc must never be reported clean:\n{stderr}"
+    );
+}
+#[test]
+fn a_file_level_trivially_true_cfg_attr_doc_reaches_exit_four() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#![cfg_attr(all(), doc = \"{long}\")]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a file-level always-true cfg_attr doc is unconditional\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.text("item"), "file-level");
+}
+#[test]
+fn a_trivially_false_cfg_attr_doc_is_neither_finding_nor_undecided() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#[cfg_attr(any(), doc = \"{long}\")]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("findings"), 0);
+    assert_eq!(
+        summary.number("undecided"),
+        0,
+        "cfg_attr(any(), ...) applies in no configuration:\n{stderr}"
+    );
+}
+#[test]
 fn an_overlong_unconditional_doc_beside_cfg_docs_is_still_a_finding() {
     let td = tempfile::tempdir().unwrap();
     let long = prose_words("w", 90);
@@ -1844,6 +1963,19 @@ fn safe_idiom_path_rewrites_cfg_attr_doc() {
     assert_eq!(
         out, "#[cfg_attr(test, doc = \" see [`Type`] here\")]\npub struct Type;\n",
         "cfg_attr(_, doc=\"...\") doc-link idiom must be rewritten; got:\n{out}"
+    );
+}
+#[test]
+fn safe_idiom_path_rewrites_nested_cfg_attr_doc() {
+    let td = tempfile::tempdir().unwrap();
+    let original =
+        "#[cfg_attr(test, cfg_attr(unix, doc = \" see [Type](Type) here\"))]\npub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    run_idioms(td.path());
+    let out = read(td.path(), "a.rs");
+    assert_eq!(
+        out, "#[cfg_attr(test, cfg_attr(unix, doc = \" see [`Type`] here\"))]\npub struct Type;\n",
+        "nested cfg_attr doc-link idiom must be rewritten; got:\n{out}"
     );
 }
 #[test]

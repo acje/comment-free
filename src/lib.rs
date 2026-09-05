@@ -1121,41 +1121,51 @@ fn collect_cfg_attr_doc_splices(attrs: &[Attribute], original: &str, out: &mut V
         let Meta::List(list) = &attr.meta else {
             continue;
         };
-        let parsed: Result<Punctuated<Meta, Token![,]>, _> =
-            list.parse_args_with(Punctuated::parse_terminated);
-        let Ok(metas) = parsed else {
-            continue;
-        };
-        for meta in metas.iter().skip(1) {
-            let Meta::NameValue(nv) = meta else {
-                continue;
-            };
-            if !nv.path.is_ident("doc") {
-                continue;
+        collect_cfg_attr_list_doc_splices(list, original, out);
+    }
+}
+fn collect_cfg_attr_list_doc_splices(
+    list: &syn::MetaList,
+    original: &str,
+    out: &mut Vec<DocSplice>,
+) {
+    let Ok(metas) = cfg_meta_args(list) else {
+        return;
+    };
+    for meta in metas.iter().skip(1) {
+        match meta {
+            Meta::List(inner) if inner.path.is_ident("cfg_attr") => {
+                collect_cfg_attr_list_doc_splices(inner, original, out);
             }
-            let syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(s),
-                ..
-            }) = &nv.value
-            else {
-                continue;
-            };
-            let range = s.span().byte_range();
-            let Some(body) = original.get(range.clone()) else {
-                continue;
-            };
-            if !(body.starts_with('"') && body.ends_with('"')) {
-                continue;
+            Meta::NameValue(nv) if nv.path.is_ident("doc") => {
+                push_doc_literal_splice(nv, original, out);
             }
-            let value = s.value();
-            let rewritten = rewrite_rustdoc_link_idioms(&value);
-            if rewritten == value {
-                continue;
-            }
-            let replacement = render_quoted_doc_literal(&rewritten);
-            out.push(DocSplice { range, replacement });
+            _ => {}
         }
     }
+}
+fn push_doc_literal_splice(nv: &syn::MetaNameValue, original: &str, out: &mut Vec<DocSplice>) {
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(s),
+        ..
+    }) = &nv.value
+    else {
+        return;
+    };
+    let range = s.span().byte_range();
+    let Some(body) = original.get(range.clone()) else {
+        return;
+    };
+    if !(body.starts_with('"') && body.ends_with('"')) {
+        return;
+    }
+    let value = s.value();
+    let rewritten = rewrite_rustdoc_link_idioms(&value);
+    if rewritten == value {
+        return;
+    }
+    let replacement = render_quoted_doc_literal(&rewritten);
+    out.push(DocSplice { range, replacement });
 }
 fn push_single_line(out: &mut String, path: &Path) {
     push_single_line_str(out, &path.display().to_string());
@@ -1518,13 +1528,13 @@ impl DocLintReport {
 }
 /// Lint `ast` for doc-comments whose prose word count exceeds `budget.max_words`.
 ///
-/// `///`, `//!` and `#[doc=...]` payloads are concatenated in source
-/// order and counted as one document. `cfg_attr` doc payloads are held
-/// separately: their predicates are unresolved here and two of them may
-/// be mutually exclusive. An item is a finding only when its
-/// unconditional doc set alone exceeds the budget, and undecided when
-/// only some configurations do. Fenced lines are excluded. Docs inside
-/// opaque macro bodies are not visited.
+/// `///`, `//!` and `#[doc=...]` payloads count as one document.
+/// `cfg_attr` payloads, nested ones included, are held separately:
+/// constant `all()` / `any()` predicates fold, others stay unresolved. A finding requires the
+/// unconditional set alone to be over budget; any surviving unresolved
+/// payload makes the item undecided. The all-payload concatenation is
+/// an upper bound, not a real build, so it never establishes clean.
+/// Fenced lines are excluded. Opaque macro bodies are skipped.
 #[must_use]
 pub fn doc_lint_file(ast: &syn::File, budget: DocBudget) -> DocLintReport {
     let mut visitor = DocLintVisitor {
@@ -1583,12 +1593,9 @@ fn decide_doc_budget(docs: &ItemDocs, budget: usize) -> DocVerdict {
             DocVerdict::Clean
         };
     }
-    if all.count() <= budget {
-        return DocVerdict::Clean;
-    }
     let unconditional = prose_word_count(&docs.unconditional_text());
-    let split_broke_a_fence = unconditional.is_fail_closed() && !all.is_fail_closed();
-    if unconditional.count() > budget && !split_broke_a_fence {
+    let fence_state_resolved = !unconditional.is_fail_closed() && !docs.conditional_toggles_fence();
+    if fence_state_resolved && unconditional.count() > budget {
         return DocVerdict::Overlong(unconditional);
     }
     DocVerdict::ConfigurationDependent {
@@ -1616,6 +1623,12 @@ impl ItemDocs {
         self.parts
             .iter()
             .any(|p| p.origin == DocOrigin::Conditional)
+    }
+    fn conditional_toggles_fence(&self) -> bool {
+        self.parts
+            .iter()
+            .filter(|p| p.origin == DocOrigin::Conditional)
+            .any(|p| p.payload.lines().any(opens_or_closes_fence))
     }
     fn unconditional_text(&self) -> String {
         self.text(|p| p.origin == DocOrigin::Unconditional)
@@ -1649,14 +1662,10 @@ fn extract_doc_text(attrs: &[Attribute]) -> Option<ItemDocs> {
                 payload,
             });
         } else if is_cfg_attr(attr) {
-            for payload in cfg_attr_doc_payloads(attr) {
-                if first_line.is_none() {
-                    first_line = Some(line);
-                }
-                parts.push(DocPart {
-                    origin: DocOrigin::Conditional,
-                    payload,
-                });
+            let before = parts.len();
+            collect_cfg_attr_doc_parts(attr, &mut parts);
+            if parts.len() > before && first_line.is_none() {
+                first_line = Some(line);
             }
         }
     }
@@ -1679,38 +1688,121 @@ fn doc_payload(attr: &Attribute) -> Option<String> {
     };
     Some(s.value())
 }
-fn cfg_attr_doc_payloads(attr: &Attribute) -> Vec<String> {
-    let Meta::List(list) = &attr.meta else {
-        return Vec::new();
-    };
-    if !list.path.is_ident("cfg_attr") {
-        return Vec::new();
-    }
-    let parsed: Result<Punctuated<Meta, Token![,]>, _> =
-        list.parse_args_with(Punctuated::parse_terminated);
-    let Ok(metas) = parsed else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for meta in metas.into_iter().skip(1) {
-        if let Meta::NameValue(nv) = &meta
-            && nv.path.is_ident("doc")
-            && let syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(s),
-                ..
-            }) = &nv.value
-        {
-            out.push(s.value());
+/// Truth value of a `cfg` predicate under a build configuration this
+/// crate has not been told, folded as far as the predicate's own
+/// boolean constants allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CfgTruth {
+    Always,
+    Never,
+    Unresolved,
+}
+impl CfgTruth {
+    const fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Never, _) | (_, Self::Never) => Self::Never,
+            (Self::Always, Self::Always) => Self::Always,
+            _ => Self::Unresolved,
         }
     }
-    out
+    const fn or(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Always, _) | (_, Self::Always) => Self::Always,
+            (Self::Never, Self::Never) => Self::Never,
+            _ => Self::Unresolved,
+        }
+    }
+    const fn negate(self) -> Self {
+        match self {
+            Self::Always => Self::Never,
+            Self::Never => Self::Always,
+            Self::Unresolved => Self::Unresolved,
+        }
+    }
+    const fn doc_origin(self) -> Option<DocOrigin> {
+        match self {
+            Self::Always => Some(DocOrigin::Unconditional),
+            Self::Unresolved => Some(DocOrigin::Conditional),
+            Self::Never => None,
+        }
+    }
+}
+fn fold_cfg_predicate(meta: &Meta) -> CfgTruth {
+    let Meta::List(list) = meta else {
+        return CfgTruth::Unresolved;
+    };
+    let Ok(inner) = cfg_meta_args(list) else {
+        return CfgTruth::Unresolved;
+    };
+    if list.path.is_ident("all") {
+        return inner
+            .iter()
+            .fold(CfgTruth::Always, |acc, m| acc.and(fold_cfg_predicate(m)));
+    }
+    if list.path.is_ident("any") {
+        return inner
+            .iter()
+            .fold(CfgTruth::Never, |acc, m| acc.or(fold_cfg_predicate(m)));
+    }
+    match (list.path.is_ident("not"), inner.first()) {
+        (true, Some(only)) if inner.len() == 1 => fold_cfg_predicate(only).negate(),
+        _ => CfgTruth::Unresolved,
+    }
+}
+fn cfg_meta_args(list: &syn::MetaList) -> syn::Result<Punctuated<Meta, Token![,]>> {
+    list.parse_args_with(Punctuated::parse_terminated)
+}
+fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
+    let Meta::List(list) = &attr.meta else {
+        return;
+    };
+    if !list.path.is_ident("cfg_attr") {
+        return;
+    }
+    collect_cfg_attr_list_doc_parts(list, CfgTruth::Always, out);
+}
+fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &mut Vec<DocPart>) {
+    let Ok(metas) = cfg_meta_args(list) else {
+        return;
+    };
+    let mut metas = metas.into_iter();
+    let Some(predicate) = metas.next() else {
+        return;
+    };
+    let truth = outer.and(fold_cfg_predicate(&predicate));
+    let Some(origin) = truth.doc_origin() else {
+        return;
+    };
+    for meta in metas {
+        match &meta {
+            Meta::NameValue(nv) if nv.path.is_ident("doc") => {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+                {
+                    out.push(DocPart {
+                        origin,
+                        payload: s.value(),
+                    });
+                }
+            }
+            Meta::List(inner) if inner.path.is_ident("cfg_attr") => {
+                collect_cfg_attr_list_doc_parts(inner, truth, out);
+            }
+            _ => {}
+        }
+    }
+}
+fn opens_or_closes_fence(line: &str) -> bool {
+    let stripped = line.trim_start();
+    stripped.starts_with("```") || stripped.starts_with("~~~")
 }
 fn prose_word_count(doc_text: &str) -> WordCount {
     let mut in_fence = false;
     let mut words = 0usize;
     for line in doc_text.lines() {
-        let stripped = line.trim_start();
-        if stripped.starts_with("```") || stripped.starts_with("~~~") {
+        if opens_or_closes_fence(line) {
             in_fence = !in_fence;
             continue;
         }
@@ -2455,14 +2547,105 @@ mod doc_lint_tests {
         );
     }
     #[test]
-    fn cfg_docs_within_budget_in_every_configuration_are_clean() {
+    fn cfg_docs_within_the_aggregate_budget_are_undecided_not_clean() {
         let f: syn::File = parse_quote! {
             #[doc = " w01 w02"] #[cfg_attr(unix, doc = " w03 w04")] #[cfg_attr(windows, doc =
             " w05 w06")] pub fn foo() {}
         };
         let r = report(&f, 6);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(
+            r.undecided().len(),
+            1,
+            "the all-payload aggregate is not an attainable configuration: {:?}",
+            r.undecided()
+        );
+    }
+    #[test]
+    fn a_conditional_fence_hiding_unconditional_prose_is_undecided() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(unix, doc = " ```")] #[doc =
+            " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix, doc = " ```")]
+            pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(
+            r.undecided().len(),
+            1,
+            "a conditional fence leaves the unconditional prose undecided: {:?}",
+            r.undecided()
+        );
+    }
+    #[test]
+    fn nested_cfg_attr_doc_payload_is_not_invisible() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(unix, cfg_attr(windows, doc =
+            " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"))] pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(
+            r.undecided().len(),
+            1,
+            "a nested cfg_attr doc payload must not vanish: {:?}",
+            r.undecided()
+        );
+        assert_eq!(r.undecided()[0].all_configurations_words().count(), 10);
+    }
+    #[test]
+    fn a_trivially_true_cfg_attr_doc_is_a_finding() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(all(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+            pub fn foo() {}
+        };
+        let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+        assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
+        assert_eq!(r.findings()[0].words().count(), 10);
+    }
+    #[test]
+    fn a_nested_trivially_true_cfg_attr_doc_is_a_finding() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(all(), cfg_attr(all(), doc =
+            " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"))] pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+        assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
+        assert_eq!(r.findings()[0].words().count(), 10);
+    }
+    #[test]
+    fn a_trivially_false_cfg_attr_doc_carries_no_words() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(any(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+            pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+    }
+    #[test]
+    fn boolean_constant_predicates_fold_through_not_and_nesting() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(not(any()), doc = " w01 w02 w03 w04 w05")] #[cfg_attr(any(all(), unix),
+            doc = " w06 w07 w08 w09 w10")] #[cfg_attr(all(any(), unix), doc =
+            " x01 x02 x03 x04 x05 x06 x07 x08 x09 x10")] pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+        assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
+        assert_eq!(r.findings()[0].words().count(), 10);
+    }
+    #[test]
+    fn a_file_level_trivially_true_cfg_attr_doc_is_a_finding() {
+        let f: syn::File = parse_quote! {
+            #![cfg_attr(all(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+        };
+        let r = report(&f, 8);
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+        assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
+        assert_eq!(r.findings()[0].item_label(), "file-level");
     }
     #[test]
     fn a_fence_split_across_a_cfg_boundary_is_undecided_not_a_finding() {

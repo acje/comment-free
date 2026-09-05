@@ -245,20 +245,20 @@ fn run_strip(root: &Path, mode: RewriteMode) -> u32 {
             }
         };
         match process_file(&path, mode) {
-            FileOutcome::Rewritten { counts } => {
+            FileOutcome::Rewritten(summary) => {
                 rewritten += 1;
-                counts_total += counts;
+                counts_total += summary.counts();
                 println!("{}", rewrite_file_record(mode, &path));
             }
-            FileOutcome::WouldRewrite { diff, counts } => {
+            FileOutcome::WouldRewrite(preview) => {
                 rewritten += 1;
-                counts_total += counts;
+                counts_total += preview.counts();
                 println!("{}", rewrite_file_record(mode, &path));
-                print!("{diff}");
+                print!("{}", preview.diff());
             }
-            FileOutcome::Unchanged { counts } => {
+            FileOutcome::Unchanged(summary) => {
                 unchanged += 1;
-                counts_total += counts;
+                counts_total += summary.counts();
             }
             FileOutcome::Failed(e) => {
                 errors += 1;

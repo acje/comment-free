@@ -241,25 +241,50 @@ impl From<&CommentFreeError> for ExitCode {
 #[derive(Debug)]
 pub enum FileOutcome {
     /// Write mode: the new content replaced the file on disk.
-    Rewritten {
-        /// Counters for the passes applied to this file.
-        counts: RewriteCounts,
-    },
-    /// Dry-run mode: nothing was written; `diff` is the unified diff
+    Rewritten(RewriteSummary),
+    /// Dry-run mode: nothing was written; the preview carries the diff
     /// the write would have produced.
-    WouldRewrite {
-        /// Unified diff between the original and the rewrite.
-        diff: String,
-        /// Counters for the passes applied to this file.
-        counts: RewriteCounts,
-    },
+    WouldRewrite(RewritePreview),
     /// No bytes changed; the file was left alone in either mode.
-    Unchanged {
-        /// Counters for the passes applied to this file.
-        counts: RewriteCounts,
-    },
+    Unchanged(RewriteSummary),
     /// The file was not processed, and was left exactly as found.
     Failed(FileError),
+}
+/// Counters for the passes [`process_file`] applied to one file.
+///
+/// Has no public constructor: an outcome payload is evidence of work
+/// this crate performed, not a value a caller can assert.
+#[derive(Debug)]
+pub struct RewriteSummary {
+    counts: RewriteCounts,
+}
+impl RewriteSummary {
+    /// Counters for the passes applied to this file.
+    #[must_use]
+    pub const fn counts(&self) -> RewriteCounts {
+        self.counts
+    }
+}
+/// The dry-run preview of a rewrite: the unified diff plus its counters.
+///
+/// Has no public constructor, so an empty diff — a state
+/// [`process_file`] never emits — cannot be presented as a preview.
+#[derive(Debug)]
+pub struct RewritePreview {
+    diff: String,
+    counts: RewriteCounts,
+}
+impl RewritePreview {
+    /// Unified diff between the original and the rewrite.
+    #[must_use]
+    pub fn diff(&self) -> &str {
+        &self.diff
+    }
+    /// Counters for the passes applied to this file.
+    #[must_use]
+    pub const fn counts(&self) -> RewriteCounts {
+        self.counts
+    }
 }
 /// Why [`process_file`] could not process a file.
 ///
@@ -653,15 +678,15 @@ pub fn process_file(path: &Path, mode: RewriteMode) -> FileOutcome {
     let (rewritten, mut counts) = strip_line_comments_with_counts(&after_links);
     counts.doc_links_rewritten = doc_links_rewritten;
     if rewritten == original {
-        return FileOutcome::Unchanged { counts };
+        return FileOutcome::Unchanged(RewriteSummary { counts });
     }
     match mode {
-        RewriteMode::DryRun { context } => FileOutcome::WouldRewrite {
+        RewriteMode::DryRun { context } => FileOutcome::WouldRewrite(RewritePreview {
             diff: unified_diff(path, &original, &rewritten, context),
             counts,
-        },
+        }),
         RewriteMode::Write => match write_atomically(path, &original, &rewritten) {
-            Ok(()) => FileOutcome::Rewritten { counts },
+            Ok(()) => FileOutcome::Rewritten(RewriteSummary { counts }),
             Err(e) => FileOutcome::Failed(e),
         },
     }
@@ -1814,7 +1839,7 @@ mod atomic_write_tests {
             Err(FileError::Conflict)
         ));
         match process_file(&path, write_opts()) {
-            FileOutcome::Rewritten { .. } => {}
+            FileOutcome::Rewritten(_) => {}
             other => panic!("expected Rewritten after a conflict, got {other:?}"),
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "fn f() {}\n");
@@ -1826,7 +1851,7 @@ mod atomic_write_tests {
         let path = td.path().join("a.rs");
         fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
         match process_file(&path, write_opts()) {
-            FileOutcome::Rewritten { .. } => {}
+            FileOutcome::Rewritten(_) => {}
             other => panic!("expected Rewritten, got {other:?}"),
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "fn f() {}\n");
@@ -1841,7 +1866,7 @@ mod atomic_write_tests {
         fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         match process_file(&path, write_opts()) {
-            FileOutcome::Rewritten { .. } => {}
+            FileOutcome::Rewritten(_) => {}
             other => panic!("expected Rewritten, got {other:?}"),
         }
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
@@ -1914,7 +1939,7 @@ mod process_file_tests {
         let path = td.path().join("a.rs");
         fs::write(&path, "   \n\t\n  \n").unwrap();
         match process_file(&path, opts()) {
-            FileOutcome::Unchanged { .. } => {}
+            FileOutcome::Unchanged(_) => {}
             other => panic!("expected Unchanged for whitespace-only file, got {other:?}"),
         }
     }
@@ -1924,7 +1949,7 @@ mod process_file_tests {
         let path = td.path().join("a.rs");
         fs::write(&path, "").unwrap();
         match process_file(&path, opts()) {
-            FileOutcome::Unchanged { .. } => {}
+            FileOutcome::Unchanged(_) => {}
             other => panic!("expected Unchanged for empty file, got {other:?}"),
         }
     }
@@ -1934,9 +1959,9 @@ mod process_file_tests {
         let path = td.path().join("a.rs");
         fs::write(&path, "// SAFETY: pointer is valid\nfn f() {}\n").unwrap();
         match process_file(&path, opts()) {
-            FileOutcome::WouldRewrite { diff, counts } => {
-                assert_eq!(counts.comments_removed, 1);
-                assert!(!diff.is_empty(), "dry run must carry a diff");
+            FileOutcome::WouldRewrite(preview) => {
+                assert_eq!(preview.counts().comments_removed(), 1);
+                assert!(!preview.diff().is_empty(), "dry run must carry a diff");
             }
             other => panic!("expected WouldRewrite for SAFETY-only file, got {other:?}"),
         }

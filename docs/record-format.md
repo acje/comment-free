@@ -89,7 +89,12 @@ Up to 50 per kind, on stdout, sorted by `words - budget` descending. A
 
 ### `doc_lint_undecided`
 
-One per item whose doc set the linter could not decide, on stdout.
+One per item whose doc set the linter could not decide, on stdout. The
+evidence fields are **keyed on `outcome`**, because each cause supports
+different evidence; a consumer reads `outcome` before reading any
+numeric field.
+
+#### `outcome`: `configuration_dependent`
 
 ```json
 {"record":"doc_lint_undecided","v":2,"outcome":"configuration_dependent","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":40,"budget":80,"words_all_cfgs":95,"fail_closed":false}
@@ -121,12 +126,56 @@ every configuration. When a conditional payload opens or closes a code
 fence, the fence state at the unconditional prose is itself unresolved,
 so the item is reported here rather than as a finding.
 
-It is **not** a finding. It does not increment the `findings` counter and
-does not drive exit code 4; it increments `undecided` in `lint_summary`.
-A run with `undecided` above zero has not established that the tree is
-clean, even at exit 0.
+It is **not** a finding. It does not increment the `findings` counter;
+it increments `undecided` in `lint_summary`. A run with `undecided`
+above zero has not established that the tree is clean, and does not exit
+`0` — see "Exit codes and the meaning of clean" below.
 
 `fail_closed` reports the balance state of the `words_all_cfgs` count.
+
+#### `outcome`: `unreadable_doc_payload`
+
+```json
+{"record":"doc_lint_undecided","v":2,"outcome":"unreadable_doc_payload","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","budget":80}
+```
+
+The item carries a doc payload that is not a string literal — a macro
+call in the doc-value position, such as `#[doc = include_str!("x.md")]`,
+`#[doc = concat!(...)]`, or either of those inside a `cfg_attr`. The text
+resolves only by macro expansion, which this tool does not perform.
+
+This outcome carries **no `words`, `words_all_cfgs` or `fail_closed`
+key**. Those fields report a count produced by reading the doc text; no
+reading happened, so no count exists, and emitting `0` would assert prose
+this tool never saw. `budget` is the budget that was in force.
+
+An unreadable payload outranks an unresolved `cfg` predicate: an item
+with both is reported here, not as `configuration_dependent`. It also
+suppresses what would otherwise be a finding on the item's readable
+prose, because an unread payload may open or close a code fence, leaving
+the fence state — and therefore the word count — unresolved.
+
+A payload behind a predicate that folds to false is dropped, exactly as a
+readable one is: a payload present in no configuration is not an
+indeterminate.
+
+Two residual gaps this outcome does **not** cover, stated so they are not
+mistaken for coverage: doc text synthesised by a procedural macro from
+tokens that never spell `doc` is invisible to a syntactic tool, and is
+not detected.
+
+### Exit codes and the meaning of clean
+
+Default lint mode exits `4` when the run produced at least one finding
+**or** at least one undecided item, and `0` only when it produced
+neither. One rule governs both indeterminates. Exit `0` is the assertion
+"this tree is clean", and a run that could not read or could not decide
+part of the tree has not established that.
+
+Exit `4` therefore does not mean "findings observed". The two remain
+distinguishable in the records: `lint_summary` counts `findings` and
+`undecided` separately, and every `doc_lint_*` record names its
+`outcome`.
 
 ### `rewrite_summary`
 
@@ -217,13 +266,16 @@ does not is not a conforming consumer.
 4. **Treat an unknown `kind` value as indeterminate, never as clean.**
    New finding kinds may be added within the same version.
 5. **Treat an unknown `outcome` value as indeterminate, never as
-   clean.** Two values are emitted today: `finding`, and
-   `configuration_dependent` on the `doc_lint_undecided` record, where a
-   doc set behind unresolved `cfg` predicates is over budget for some
-   configurations only. A further indeterminate outcome is planned for
-   doc comments generated inside uninspected macro bodies. Such
-   additions arrive as an added `outcome` value with additional keys,
-   under `v=2`.
+   clean.** Three values are emitted today: `finding`; and, on the
+   `doc_lint_undecided` record, `configuration_dependent` for a doc set
+   behind unresolved `cfg` predicates that is over budget for some
+   configurations only, and `unreadable_doc_payload` for a doc payload
+   that is not a string literal. A further indeterminate outcome is
+   planned for doc comments generated inside uninspected macro bodies.
+   Such additions arrive as an added `outcome` value, under `v=2`, and
+   may carry a different key set from the outcomes already defined —
+   which is why the evidence fields of `doc_lint_undecided` are read
+   only after its `outcome`.
 6. **Reject duplicate keys.** A record with a repeated key is malformed;
    do not keep the last value.
 7. **Reject a record carrying a key not in its schema** if you are

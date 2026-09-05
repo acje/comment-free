@@ -64,11 +64,40 @@ From a checkout, `cargo run -- <args>` is equivalent.
 
 Exit codes:
 
-- `0`: clean
+- `0`: clean — every doc payload under ROOT was read, and every one of them
+  was decided against the budget
 - `1`: catastrophic / unmapped IO error
 - `2`: invalid CLI arguments
-- `4`: doc-lint findings in default mode
+- `4`: the tree did not come back clean in default mode — at least one
+  doc-lint finding, or at least one undecided item
 - `5`: per-file parse or I/O errors during processing, or a write conflict
+
+Exit `4` covers findings and indeterminates alike, because exit `0` means
+*clean* and a run that could not read everything has not shown the tree to
+be clean. The two are still distinguishable: read `findings` and
+`undecided` in the `lint_summary` record, and the `outcome` field of each
+`doc_lint_*` record.
+
+### Known limitation: doc payloads this tool cannot read
+
+A doc payload written as a macro call rather than a string literal
+resolves only by macro expansion, which this tool does not perform:
+
+```rust
+#[doc = include_str!("overview.md")]
+#[doc = concat!(" generated ", stringify!(prose))]
+#[cfg_attr(all(), doc = concat!(" more"))]
+```
+
+Such an item is reported as a `doc_lint_undecided` record with `outcome`
+`unreadable_doc_payload`, carrying no word count — no reading produced
+one — and it never counts as clean. This is a reported gap, not a silent
+one; until it is closed, a crate using these idioms cannot reach exit `0`
+in default lint mode.
+
+Doc text synthesised by a procedural macro from tokens that never spell
+`doc` remains out of reach of a purely syntactic tool, and is not
+detected at all.
 
 `--rustdoc-link-idioms` is a deprecated alias for `--rewrite` and is retained
 for one release.

@@ -80,9 +80,12 @@ impl Record {
     fn name(&self) -> &str {
         self.text("record")
     }
+    fn keys(&self) -> Vec<&str> {
+        self.fields.iter().map(|(k, _)| k.as_str()).collect()
+    }
 }
 
-fn schema(record: &str) -> Option<&'static [&'static str]> {
+fn schema(record: &str, outcome: Option<&str>) -> Option<&'static [&'static str]> {
     match record {
         "doc_lint_finding" => Some(&[
             "record",
@@ -101,19 +104,25 @@ fn schema(record: &str) -> Option<&'static [&'static str]> {
             "record", "v", "outcome", "kind", "path", "line", "item", "words", "budget",
         ]),
         "doc_lint_truncated" => Some(&["record", "v", "kind", "remaining"]),
-        "doc_lint_undecided" => Some(&[
-            "record",
-            "v",
-            "outcome",
-            "kind",
-            "path",
-            "line",
-            "item",
-            "words",
-            "budget",
-            "words_all_cfgs",
-            "fail_closed",
-        ]),
+        "doc_lint_undecided" => match outcome {
+            Some("configuration_dependent") => Some(&[
+                "record",
+                "v",
+                "outcome",
+                "kind",
+                "path",
+                "line",
+                "item",
+                "words",
+                "budget",
+                "words_all_cfgs",
+                "fail_closed",
+            ]),
+            Some("unreadable_doc_payload") => Some(&[
+                "record", "v", "outcome", "kind", "path", "line", "item", "budget",
+            ]),
+            _ => None,
+        },
         "rewrite_summary" => Some(&[
             "record",
             "v",
@@ -271,7 +280,12 @@ fn parse_record(line: &str) -> Result<Record, RecordError> {
         Some((_, Field::Text(name))) => name.clone(),
         _ => return Err(RecordError::Malformed("missing `record` field".to_string())),
     };
-    let known = schema(&record).ok_or_else(|| RecordError::UnknownRecord(record.clone()))?;
+    let outcome = match fields.iter().find(|(k, _)| k == "outcome") {
+        Some((_, Field::Text(name))) => Some(name.as_str()),
+        _ => None,
+    };
+    let known =
+        schema(&record, outcome).ok_or_else(|| RecordError::UnknownRecord(record.clone()))?;
     if let Some((key, _)) = fields.iter().find(|(k, _)| !known.contains(&k.as_str())) {
         return Err(RecordError::UnknownField(key.clone()));
     }
@@ -924,8 +938,9 @@ fn mutually_exclusive_cfg_docs_are_undecided_not_a_finding() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),
-        Some(0),
-        "mutually exclusive cfg doc sets must not sum into a finding, expected exit 0, got {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        Some(4),
+        "mutually exclusive cfg doc sets must not sum into a finding, but an undecided item \
+         is not clean either, so the run must not exit 0, got {:?}\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code()
     );
     assert!(
@@ -3111,4 +3126,83 @@ fn idioms_flag_rewrites_a_shortcut_whose_definition_is_indented_code() {
         "/// see [`Type`] here\n///\n///     [Type]: /type\npub struct Type;\n",
         "four-space indentation is indented code, not a reference definition"
     );
+}
+#[test]
+fn an_unreadable_doc_payload_alone_does_not_exit_zero() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "prose.md", "a b c d e f g h i j\n");
+    write(
+        td.path(),
+        "a.rs",
+        "#[doc = include_str!(\"prose.md\")]\npub fn f() {}\n",
+    );
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a doc payload the tool cannot read must not be reported clean\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        records_named(&stdout, "doc_lint_finding").is_empty(),
+        "the payload was never read, so no finding is provable:\n{stdout}"
+    );
+    let undecided = one_record(&stdout, "doc_lint_undecided");
+    assert_eq!(undecided.text("outcome"), "unreadable_doc_payload");
+    assert_eq!(undecided.text("kind"), "overlong_doc");
+    assert_eq!(undecided.number("v"), 2, "record version drift");
+    assert_eq!(undecided.text("item"), "fn f");
+    assert_eq!(undecided.number("budget"), 80);
+    assert_eq!(
+        undecided.keys(),
+        vec![
+            "record", "v", "outcome", "kind", "path", "line", "item", "budget"
+        ],
+        "an unreadable payload carries no word count: no reading produced one"
+    );
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("findings"), 0);
+    assert_eq!(summary.number("undecided"), 1);
+    assert_eq!(summary.number("errors"), 0);
+}
+#[test]
+fn a_configuration_dependent_undecided_alone_does_not_exit_zero() {
+    let td = tempfile::tempdir().unwrap();
+    let unix_doc = prose_words("u", 45);
+    let win_doc = prose_words("w", 45);
+    let src = format!(
+        "#[cfg_attr(unix, doc = \"{unix_doc}\")]\n\
+         #[cfg_attr(windows, doc = \"{win_doc}\")]\n\
+         pub fn f() {{}}\n"
+    );
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "both indeterminates share one exit rule: a run that could not see everything \
+         must not claim it did\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("findings"), 0);
+    assert_eq!(summary.number("undecided"), 1);
+}
+#[test]
+fn a_non_literal_cfg_attr_doc_expression_does_not_exit_zero() {
+    let td = tempfile::tempdir().unwrap();
+    let src = "#[cfg_attr(all(), doc = concat!(\" a\", \" b c\"))]\npub fn f() {}\n";
+    write(td.path(), "a.rs", src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "folding the predicate does not recover a payload the tool cannot read\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let undecided = one_record(&stdout, "doc_lint_undecided");
+    assert_eq!(undecided.text("outcome"), "unreadable_doc_payload");
 }

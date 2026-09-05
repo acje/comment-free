@@ -38,7 +38,7 @@ use std::process::ExitCode;
                     doc_lint_header    one per finding kind, names the doctrine once\n\
                     doc_lint_hint      up to 50 per kind, sorted by overshoot descending\n\
                     doc_lint_truncated tail summary when a kind has > 50 findings\n\
-                    doc_lint_undecided one per item whose doc set depends on `cfg`\n\
+                    doc_lint_undecided one per item the linter could not decide\n\
                     run_error          one per failed path: kind, path, message\n\
                     doc_file_warning   one per documentation file left untouched\n\
                     rewrite_file       one per changed file: mode, path\n\
@@ -64,14 +64,28 @@ use std::process::ExitCode;
                   on stderr.\n\
                   \n\
                   Exit codes:\n\
-                    0  clean (no findings, no errors); an undecided,\n\
-                       configuration-dependent doc set is reported, not a finding\n\
+                    0  clean: every doc payload under ROOT was read and every\n\
+                       one of them was decided against the budget\n\
                     1  catastrophic / unmapped IO error\n\
                     2  invalid CLI arguments (clap rejection)\n\
-                    4  doc-lint findings observed (default mode)\n\
+                    4  the tree did not come back clean in default mode: at\n\
+                       least one doc-lint finding, or at least one undecided\n\
+                       item. An undecided item is NOT a finding — read\n\
+                       `findings` and `undecided` in `lint_summary` to tell\n\
+                       them apart. A run that could not see everything does\n\
+                       not report exit 0, because that code means clean\n\
                     5  per-file parse/IO errors, or directory-traversal errors,\n\
                        observed during processing (both modes); each is reported\n\
                        as a `run_error` record naming its kind\n\
+                  \n\
+                  Known limitation — doc payloads this tool cannot read:\n\
+                  \n\
+                  A doc payload written as a macro call rather than a string\n\
+                  literal — `#[doc = include_str!(\"x.md\")]`,\n\
+                  `#[doc = concat!(...)]`, the same inside `cfg_attr` — resolves\n\
+                  only by macro expansion, which this tool does not perform. Such\n\
+                  an item is reported as a `doc_lint_undecided` record with\n\
+                  `outcome` `unreadable_doc_payload` and is never counted clean.\n\
                   \n\
                   Output streams: findings (doc_lint_* records, rewrite_file records, \
                   diffs) on stdout; metadata (strip_summary, lint_summary, rewrite_summary, \
@@ -364,7 +378,7 @@ fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
     if errors > 0 {
         return Ok(errors);
     }
-    if findings_total > 0 {
+    if findings_total > 0 || undecided_total > 0 {
         return Err(CommentFreeError::DocLintFailure);
     }
     Ok(0)

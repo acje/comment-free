@@ -1326,18 +1326,7 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| {
-            if e.depth() == 0 {
-                return true;
-            }
-            let name = e.file_name().to_string_lossy();
-            if e.file_type().is_dir()
-                && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()))
-            {
-                return false;
-            }
-            true
-        });
+        .filter_entry(|e| prune::traversal(e, prune::Pruned::Directories).descends());
     for entry in walker {
         match entry {
             Err(e) => scan.errors.push(WalkError::rooted_at(root, &e)),
@@ -1350,6 +1339,41 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
     scan
 }
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
+mod prune {
+    use super::SKIP_DIRS;
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Traversal {
+        Prune,
+        Descend,
+    }
+    impl Traversal {
+        pub(super) const fn descends(self) -> bool {
+            matches!(self, Self::Descend)
+        }
+    }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Pruned {
+        Directories,
+        NonFiles,
+    }
+    impl Pruned {
+        fn covers(self, kind: std::fs::FileType) -> bool {
+            match self {
+                Self::Directories => kind.is_dir(),
+                Self::NonFiles => !kind.is_file(),
+            }
+        }
+    }
+    pub(super) fn traversal(entry: &walkdir::DirEntry, pruned: Pruned) -> Traversal {
+        let name = entry.file_name().to_string_lossy();
+        let prunable = entry.depth() > 0 && pruned.covers(entry.file_type());
+        if prunable && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref())) {
+            Traversal::Prune
+        } else {
+            Traversal::Descend
+        }
+    }
+}
 const ALLOWED_ROOT_DIRS: &[&str] = &["benches", "crates", "examples", "src", "tests"];
 const ALLOWED_ROOT_FILES: &[&str] = &["build.rs"];
 const CARGO_MANIFEST: &str = "Cargo.toml";
@@ -1507,18 +1531,7 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
             WalkDir::new(&base)
                 .follow_links(false)
                 .into_iter()
-                .filter_entry(|e| {
-                    if e.depth() == 0 {
-                        return true;
-                    }
-                    let name = e.file_name().to_string_lossy();
-                    if !e.file_type().is_file()
-                        && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()))
-                    {
-                        return false;
-                    }
-                    true
-                })
+                .filter_entry(|e| prune::traversal(e, prune::Pruned::NonFiles).descends())
                 .filter_map(move |entry| match entry {
                     Err(e) => Some(Err(WalkError::rooted_at(&base, &e))),
                     Ok(e) if e.file_type().is_file() => {

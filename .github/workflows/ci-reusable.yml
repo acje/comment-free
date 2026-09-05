@@ -35,6 +35,16 @@ jobs:
         if: always()
       - run: cargo test --all-features --locked
         if: always()
+      - name: dogfood — doc-comment lint on own source
+        run: cargo run --quiet --locked -- .
+        if: always()
+      - name: dogfood — no non-doc comments in own source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --locked -- --rewrite .
+          git diff --exit-code
+        if: always()
 
   supply-chain:
     name: supply-chain (audit + deny)

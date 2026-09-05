@@ -32,7 +32,8 @@ pub const DOC_LINT_RECORD_GRAMMAR: &str = "\
 {\"record\":\"doc_lint_hint\",\"v\":<N>,\"outcome\":<OUTCOME>,\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"words\":<U32>,\"budget\":<U32>}
 {\"record\":\"doc_lint_truncated\",\"v\":<N>,\"kind\":<KIND>,\"remaining\":<U32>}
 {\"record\":\"doc_lint_undecided\",\"v\":<N>,\"outcome\":\"configuration_dependent\",\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"words\":<U32>,\"budget\":<U32>,\"words_all_cfgs\":<U32>,\"fail_closed\":<BOOL>}
-{\"record\":\"doc_lint_undecided\",\"v\":<N>,\"outcome\":\"unreadable_doc_payload\",\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"budget\":<U32>}";
+{\"record\":\"doc_lint_undecided\",\"v\":<N>,\"outcome\":\"unreadable_doc_payload\",\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"budget\":<U32>}
+{\"record\":\"doc_lint_undecided\",\"v\":<N>,\"outcome\":\"uninspected_macro_body\",\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"budget\":<U32>}";
 /// Version carried by the `v` field of the `rewrite_summary` record.
 ///
 /// Independent of [`DOC_LINT_RECORD_VERSION`]: the rewrite-summary
@@ -127,6 +128,10 @@ pub enum DocLintOutcome {
     /// position, resolved only by expansion. Not a finding, and not
     /// clean.
     UnreadableDocPayload,
+    /// A macro token body carries a doc attribute. What the expansion
+    /// attaches it to, and how many times, is resolved only by
+    /// expansion. Not a finding, and not clean.
+    UninspectedMacroBody,
 }
 impl DocLintOutcome {
     /// The `outcome` field value carried by emitted records.
@@ -136,6 +141,7 @@ impl DocLintOutcome {
             Self::Finding => "finding",
             Self::ConfigurationDependent => "configuration_dependent",
             Self::UnreadableDocPayload => "unreadable_doc_payload",
+            Self::UninspectedMacroBody => "uninspected_macro_body",
         }
     }
 }
@@ -525,7 +531,7 @@ pub fn doc_lint_undecided_record(
             let fail_closed = all_configurations.is_fail_closed();
             write!(out, ":{fail_closed}").expect("Write for String never fails");
         }
-        UndecidedCause::UnreadableDocPayload => {
+        UndecidedCause::UnreadableDocPayload | UndecidedCause::UninspectedMacroBody => {
             push_undecided_head(
                 &mut out,
                 kind,
@@ -1514,6 +1520,9 @@ pub enum UndecidedCause {
     /// The doc-value position holds an expression this tool cannot
     /// read — a macro call resolved only by expansion.
     UnreadableDocPayload,
+    /// A macro token body carries a doc attribute this tool does not
+    /// expand, so the item it documents does not exist to be counted.
+    UninspectedMacroBody,
 }
 /// An item whose doc set the linter could not decide.
 ///
@@ -1555,6 +1564,7 @@ impl DocUndecided {
         match self.cause {
             UndecidedCause::ConfigurationDependent { .. } => DocLintOutcome::ConfigurationDependent,
             UndecidedCause::UnreadableDocPayload => DocLintOutcome::UnreadableDocPayload,
+            UndecidedCause::UninspectedMacroBody => DocLintOutcome::UninspectedMacroBody,
         }
     }
 }
@@ -1583,18 +1593,19 @@ impl DocLintReport {
 }
 /// Lint `ast` for doc-comments whose prose word count exceeds `budget.max_words`.
 ///
-/// `///`, `//!` and `#[doc=...]` payloads count as one document.
-/// `cfg_attr` payloads, nested ones included, are held separately:
-/// constant `all()` / `any()` predicates fold, others stay unresolved. A finding requires the
-/// unconditional set alone to be over budget; any surviving unresolved
-/// payload makes the item undecided. The all-payload concatenation is
-/// an upper bound, not a real build, so it never establishes clean.
-/// Fenced lines are excluded. Opaque macro bodies are skipped.
+/// `///`, `//!` and `#[doc=...]` payloads count as one document; fenced
+/// lines are excluded. `cfg_attr` payloads, nested ones included, are
+/// held separately: constant predicates fold, others stay unresolved.
+/// A finding requires the unconditional set alone to be over budget.
+///
+/// Anything the pass could not read or could not decide is reported as
+/// an explicit indeterminate — see [`UndecidedCause`] — never as clean.
 #[must_use]
 pub fn doc_lint_file(ast: &syn::File, budget: DocBudget) -> DocLintReport {
     let mut visitor = DocLintVisitor {
         budget,
         report: DocLintReport::default(),
+        macro_name_hint: None,
     };
     visitor.lint_attrs(&ast.attrs, "file-level", None);
     syn::visit::Visit::visit_file(&mut visitor, ast);
@@ -1603,6 +1614,7 @@ pub fn doc_lint_file(ast: &syn::File, budget: DocBudget) -> DocLintReport {
 struct DocLintVisitor {
     budget: DocBudget,
     report: DocLintReport,
+    macro_name_hint: Option<String>,
 }
 impl DocLintVisitor {
     fn lint_attrs(&mut self, attrs: &[Attribute], label: &str, span_line: Option<usize>) {
@@ -2034,6 +2046,24 @@ impl<'ast> syn::visit::Visit<'ast> for DocLintVisitor {
         }
         syn::visit::visit_impl_item(self, node);
     }
+    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+        self.macro_name_hint = node.ident.as_ref().map(|id| format!("macro {id}"));
+        syn::visit::visit_item_macro(self, node);
+        self.macro_name_hint = None;
+    }
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        let hint = self.macro_name_hint.take();
+        if macro_tokens_carry_doc_attribute(node.tokens.clone()) {
+            let item_label = hint.unwrap_or_else(|| macro_invocation_label(node));
+            self.report.undecided.push(DocUndecided {
+                item_label,
+                line: node.path.span().start().line,
+                budget: self.budget.max_words,
+                cause: UndecidedCause::UninspectedMacroBody,
+            });
+        }
+        syn::visit::visit_macro(self, node);
+    }
     fn visit_field(&mut self, node: &'ast syn::Field) {
         let line = node.span().start().line;
         let label = node
@@ -2049,6 +2079,51 @@ impl<'ast> syn::visit::Visit<'ast> for DocLintVisitor {
         self.lint_attrs(&node.attrs, &label, Some(line));
         syn::visit::visit_variant(self, node);
     }
+}
+fn macro_invocation_label(mac: &syn::Macro) -> String {
+    let path = mac
+        .path
+        .segments
+        .iter()
+        .map(|s| s.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::");
+    format!("macro {path}")
+}
+fn macro_tokens_carry_doc_attribute(tokens: proc_macro2::TokenStream) -> bool {
+    let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+    trees.iter().enumerate().any(|(i, tree)| {
+        let proc_macro2::TokenTree::Group(group) = tree else {
+            return false;
+        };
+        let is_attribute_body = group.delimiter() == proc_macro2::Delimiter::Bracket
+            && attribute_pound_precedes(&trees, i);
+        (is_attribute_body && assigns_doc(group.stream()))
+            || macro_tokens_carry_doc_attribute(group.stream())
+    })
+}
+fn attribute_pound_precedes(trees: &[proc_macro2::TokenTree], index: usize) -> bool {
+    let is_punct = |offset: usize, want: char| {
+        index
+            .checked_sub(offset)
+            .and_then(|i| trees.get(i))
+            .is_some_and(|t| matches!(t, proc_macro2::TokenTree::Punct(p) if p.as_char() == want))
+    };
+    is_punct(1, '#') || (is_punct(1, '!') && is_punct(2, '#'))
+}
+fn assigns_doc(tokens: proc_macro2::TokenStream) -> bool {
+    let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
+    trees.iter().enumerate().any(|(i, tree)| match tree {
+        proc_macro2::TokenTree::Ident(id) => {
+            id == "doc"
+                && matches!(
+                    trees.get(i + 1),
+                    Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '='
+                )
+        }
+        proc_macro2::TokenTree::Group(group) => assigns_doc(group.stream()),
+        _ => false,
+    })
 }
 fn item_label_and_attrs(item: &syn::Item) -> Option<(String, &[Attribute], usize)> {
     use syn::Item::{
@@ -3044,19 +3119,148 @@ doc = " ```")] #[doc = " w11 w12 w13 w14 w15"] pub fn foo() {}
         );
     }
     #[test]
-    fn doc_inside_macro_rules_not_linted() {
+    fn an_overlong_doc_inside_macro_rules_is_undecided_not_silence() {
         let f = file(
             r#"
-macro_rules! noisy { () => { #[doc =
-" w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
-" w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
-" w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
-" w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
-" w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] pub fn inner() {} }; }
-        "#,
+macro_rules! noisy { () => {
+#[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"]
+#[doc = " w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"]
+pub fn inner() {} }; }
+"#,
         );
-        let findings = lint(&f, 5);
-        assert!(findings.is_empty(), "{findings:?}");
+        let r = report(&f, 5);
+        assert!(
+            r.findings().is_empty(),
+            "the expansion is not performed, so no word count is provable: {:?}",
+            r.findings()
+        );
+        assert_eq!(
+            r.undecided().len(),
+            1,
+            "an uninspected macro body carrying doc attributes is a reported gap, \
+             not silence: {:?}",
+            r.undecided()
+        );
+        assert_eq!(
+            r.undecided()[0].outcome(),
+            super::DocLintOutcome::UninspectedMacroBody
+        );
+        assert_eq!(r.undecided()[0].item_label(), "macro noisy");
+    }
+    #[test]
+    fn a_doc_comment_inside_a_macro_invocation_body_is_undecided() {
+        let f = file(
+            r"
+generate! {
+    /// w01 w02 w03 w04 w05 w06 w07 w08 w09 w10
+    pub fn inner() {}
+}
+",
+        );
+        let r = report(&f, 5);
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
+        assert_eq!(
+            r.undecided()[0].outcome(),
+            super::DocLintOutcome::UninspectedMacroBody
+        );
+        assert_eq!(r.undecided()[0].item_label(), "macro generate");
+    }
+    #[test]
+    fn a_macro_body_without_doc_attributes_is_clean() {
+        let f = file(
+            r#"
+macro_rules! quiet { ($x:expr) => { $x + 1 }; }
+pub fn f() {
+    let v = vec![1, 2, 3];
+    println!("this text mentions doc and docs but carries no attribute");
+    let _ = quiet!(v.len());
+}
+"#,
+        );
+        let r = report(&f, 1);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert!(
+            r.undecided().is_empty(),
+            "a macro body with no doc attribute carries no doc payload: {:?}",
+            r.undecided()
+        );
+    }
+    #[test]
+    fn a_doc_bearing_macro_body_is_reported_in_every_position() {
+        let positions = [
+            (
+                "statement",
+                "pub fn f() { generate! { #[doc = \" a b c\"] fn g() {} } }",
+            ),
+            (
+                "expression",
+                "pub fn f() -> u32 { generate!(#[doc = \" a b c\"] fn g() {}) }",
+            ),
+            (
+                "impl item",
+                "pub struct S; impl S { generate! { #[doc = \" a b c\"] fn g() {} } }",
+            ),
+            (
+                "trait item",
+                "pub trait T { generate! { #[doc = \" a b c\"] fn g() {} } }",
+            ),
+            (
+                "extern block",
+                "unsafe extern \"C\" { generate! { #[doc = \" a b c\"] fn g(); } }",
+            ),
+            (
+                "type position",
+                "pub type A = generate!(#[doc = \" a b c\"] fn g() {});",
+            ),
+            (
+                "pattern position",
+                "pub fn f() { let generate!(#[doc = \" a b c\"] x) = 1; }",
+            ),
+            ("inner doc comment", "generate! { //! w01 w02 w03\n }"),
+        ];
+        for (position, src) in positions {
+            let r = report(&file(src), 1);
+            assert_eq!(
+                r.undecided().len(),
+                1,
+                "a doc-bearing macro body in {position} position must be reported: {:?}",
+                r.undecided()
+            );
+            assert_eq!(
+                r.undecided()[0].outcome(),
+                super::DocLintOutcome::UninspectedMacroBody,
+                "{position}"
+            );
+        }
+    }
+    #[test]
+    fn a_nested_doc_bearing_macro_body_is_reported_at_the_outermost_body() {
+        let f = file(r#"outer! { inner! { #[doc = " a b c"] fn g() {} } }"#);
+        let r = report(&f, 1);
+        assert_eq!(
+            r.undecided().len(),
+            1,
+            "the inner invocation is tokens inside the outer opaque body, not a second \
+             item: one indeterminate covers the whole body: {:?}",
+            r.undecided()
+        );
+        assert_eq!(r.undecided()[0].item_label(), "macro outer");
+    }
+    #[test]
+    fn a_doc_list_attribute_inside_a_macro_body_carries_no_prose() {
+        let f = file(r"generate! { #[doc(hidden)] fn g() {} }");
+        let r = report(&f, 1);
+        assert!(
+            r.undecided().is_empty(),
+            "`#[doc(...)]` is rustdoc metadata, not doc prose: {:?}",
+            r.undecided()
+        );
+    }
+    #[test]
+    fn a_cfg_attr_doc_inside_a_macro_body_is_reported() {
+        let f = file(r#"generate! { #[cfg_attr(unix, doc = " a b c")] fn g() {} }"#);
+        let r = report(&f, 1);
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
     }
     #[test]
     fn field_and_variant_docs_linted_independently() {

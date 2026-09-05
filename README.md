@@ -95,6 +95,31 @@ one — and it never counts as clean. This is a reported gap, not a silent
 one; until it is closed, a crate using these idioms cannot reach exit `0`
 in default lint mode.
 
+### Known limitation: doc attributes inside macro bodies
+
+The same holds for a doc attribute inside a macro token body, whether a
+`macro_rules!` definition or the tokens passed to an invocation:
+
+```rust
+macro_rules! noisy {
+    () => {
+        /// prose that the expansion attaches to a generated item
+        pub fn inner() {}
+    };
+}
+```
+
+This tool does not expand macros, so it does not know which item the
+prose documents, or how many times. The body is reported as
+`outcome` `uninspected_macro_body`, naming the file and the macro, and
+does not count as clean. The report is made once, at the outermost
+opaque body.
+
+A macro body carrying **no** doc attribute is not reported: the check is
+for an attribute group containing `doc =`, so ordinary `println!` and
+`vec!` bodies stay clean, and `#[doc(hidden)]` — rustdoc metadata, not
+prose — does not trigger it either.
+
 Doc text synthesised by a procedural macro from tokens that never spell
 `doc` remains out of reach of a purely syntactic tool, and is not
 detected at all.

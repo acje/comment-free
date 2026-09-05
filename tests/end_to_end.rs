@@ -118,7 +118,7 @@ fn schema(record: &str, outcome: Option<&str>) -> Option<&'static [&'static str]
                 "words_all_cfgs",
                 "fail_closed",
             ]),
-            Some("unreadable_doc_payload") => Some(&[
+            Some("unreadable_doc_payload" | "uninspected_macro_body") => Some(&[
                 "record", "v", "outcome", "kind", "path", "line", "item", "budget",
             ]),
             _ => None,
@@ -3205,4 +3205,50 @@ fn a_non_literal_cfg_attr_doc_expression_does_not_exit_zero() {
     );
     let undecided = one_record(&stdout, "doc_lint_undecided");
     assert_eq!(undecided.text("outcome"), "unreadable_doc_payload");
+}
+#[test]
+fn a_macro_generated_overlong_doc_does_not_exit_zero() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!(
+        "macro_rules! noisy {{\n    () => {{\n        #[doc = \"{long}\"]\n        pub fn inner() {{}}\n    }};\n}}\nnoisy!();\n"
+    );
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a doc budget bypassed through a macro body must not come back clean\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        records_named(&stdout, "doc_lint_finding").is_empty(),
+        "the expansion was never performed, so no finding is provable:\n{stdout}"
+    );
+    let undecided = records_named(&stdout, "doc_lint_undecided");
+    assert_eq!(
+        undecided.len(),
+        1,
+        "the doc attribute lives in the definition's body; the `noisy!()` invocation \
+         passes no tokens and is not itself a doc payload:\n{stdout}"
+    );
+    assert!(
+        undecided
+            .iter()
+            .all(|r| r.text("outcome") == "uninspected_macro_body"),
+        "{stdout}"
+    );
+    assert_eq!(undecided[0].text("item"), "macro noisy");
+    assert_eq!(
+        undecided[0].keys(),
+        vec![
+            "record", "v", "outcome", "kind", "path", "line", "item", "budget"
+        ],
+        "an uninspected body carries no word count: no reading produced one"
+    );
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("findings"), 0);
+    assert_eq!(summary.number("undecided"), 1);
+    assert_eq!(summary.number("errors"), 0);
 }

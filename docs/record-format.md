@@ -162,7 +162,40 @@ indeterminate.
 Two residual gaps this outcome does **not** cover, stated so they are not
 mistaken for coverage: doc text synthesised by a procedural macro from
 tokens that never spell `doc` is invisible to a syntactic tool, and is
-not detected.
+not detected. Doc attributes inside a macro token body are reported
+under `uninspected_macro_body` instead.
+
+#### `outcome`: `uninspected_macro_body`
+
+```json
+{"record":"doc_lint_undecided","v":2,"outcome":"uninspected_macro_body","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"macro noisy","budget":80}
+```
+
+A macro token body — a `macro_rules!` definition, or the tokens passed to
+any macro invocation — carries a doc attribute: `#[doc = ...]`,
+`#![doc = ...]`, `#[cfg_attr(_, doc = ...)]`, or a `///` or `//!` comment,
+which the lexer presents as the same attribute tokens. This tool does not
+expand macros, so it does not know what item the expansion documents, or
+how many times.
+
+The key set is the same as `unreadable_doc_payload`, and for the same
+reason: no reading produced a word count. `item` names the macro —
+`macro noisy` for `macro_rules! noisy`, otherwise the invoked path, as in
+`macro generate`.
+
+The report is made at the **outermost** opaque body. A nested invocation
+inside that body is tokens within it, not a second item, and one
+indeterminate covers the whole body. A `macro_rules!` definition carrying
+the doc attribute is reported at its definition; an invocation such as
+`noisy!()` that passes no tokens is not itself a doc payload and is not
+reported again.
+
+A macro body that carries no doc attribute is **not** reported. The tool
+would otherwise report every `println!` and `vec!` in a tree, which is
+noise, not coverage. The precision rule is mechanical: an `attribute`
+token group containing the ident `doc` immediately followed by `=`. This
+means `#[doc(hidden)]` inside a macro body is not reported, because it is
+rustdoc metadata and carries no prose.
 
 ### Exit codes and the meaning of clean
 
@@ -266,16 +299,15 @@ does not is not a conforming consumer.
 4. **Treat an unknown `kind` value as indeterminate, never as clean.**
    New finding kinds may be added within the same version.
 5. **Treat an unknown `outcome` value as indeterminate, never as
-   clean.** Three values are emitted today: `finding`; and, on the
+   clean.** Four values are emitted today: `finding`; and, on the
    `doc_lint_undecided` record, `configuration_dependent` for a doc set
    behind unresolved `cfg` predicates that is over budget for some
-   configurations only, and `unreadable_doc_payload` for a doc payload
-   that is not a string literal. A further indeterminate outcome is
-   planned for doc comments generated inside uninspected macro bodies.
-   Such additions arrive as an added `outcome` value, under `v=2`, and
-   may carry a different key set from the outcomes already defined —
-   which is why the evidence fields of `doc_lint_undecided` are read
-   only after its `outcome`.
+   configurations only, `unreadable_doc_payload` for a doc payload that
+   is not a string literal, and `uninspected_macro_body` for a doc
+   attribute inside a macro token body. Further outcomes arrive as an
+   added `outcome` value, under `v=2`, and may carry a different key set
+   from the outcomes already defined — which is why the evidence fields
+   of `doc_lint_undecided` are read only after its `outcome`.
 6. **Reject duplicate keys.** A record with a repeated key is malformed;
    do not keep the last value.
 7. **Reject a record carrying a key not in its schema** if you are

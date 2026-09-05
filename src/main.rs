@@ -87,6 +87,13 @@ use std::process::ExitCode;
                   an item is reported as a `doc_lint_undecided` record with\n\
                   `outcome` `unreadable_doc_payload` and is never counted clean.\n\
                   \n\
+                  A doc attribute inside a macro token body — a `macro_rules!`\n\
+                  definition, or tokens passed to an invocation — is reported the\n\
+                  same way, with `outcome` `uninspected_macro_body`, naming the\n\
+                  file and the macro. Macro bodies carrying no doc attribute are\n\
+                  not reported. Doc text synthesised by a procedural macro from\n\
+                  tokens that never spell `doc` is not detected at all.\n\
+                  \n\
                   Output streams: findings (doc_lint_* records, rewrite_file records, \
                   diffs) on stdout; metadata (strip_summary, lint_summary, rewrite_summary, \
                   doc_file_warning, run_error) on stderr. Every line except the --dry-run \

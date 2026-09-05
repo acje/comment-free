@@ -208,8 +208,6 @@ pub struct WalkError {
     #[source]
     source: TraversalFailure,
 }
-/// The rendered text of a traversal failure, owned and detached from
-/// the walker that produced it.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct TraversalFailure(String);
@@ -799,36 +797,17 @@ pub fn strip_line_comments_with_counts(src: &str) -> (String, RewriteCounts) {
     }
     (out, counts)
 }
-/// State captured while inside a contiguous run of solo-line non-doc
-/// comment drops. `blanks_above` is the count of blank lines that
-/// preceded the first dropped comment in this run, derived from the
-/// `\n` run at the tail of `out` at the moment the run started.
-/// `blanks_below_emitted` accumulates the `\n` count contributed by
-/// whitespace tokens that follow each dropped comment after their
-/// leading `\n` has already been stripped by `pending_blank_collapse`.
 struct DropRun {
     blanks_above: usize,
     blanks_below_emitted: usize,
 }
-/// Count blank lines at the tail of `s`. A blank line at the tail is
-/// represented by an extra trailing `\n` beyond the one that ends the
-/// last non-empty content line. Specifically: returns
-/// `(trailing_newlines).saturating_sub(1)` so that `\n` alone yields 0,
-/// `\n\n` yields 1, `\n\n\n` yields 2, and an empty string yields 0.
 fn trailing_blank_lines(s: &str) -> usize {
     let trailing = s.bytes().rev().take_while(|b| *b == b'\n').count();
     trailing.saturating_sub(1)
 }
-/// Count the `\n` bytes in `s`.
 fn count_newlines(s: &str) -> usize {
     s.bytes().filter(|b| *b == b'\n').count()
 }
-/// Pop exactly one `\n` from the trailing-blank region of `s` — the
-/// run of `\n` bytes that ends `s` after any trailing horizontal
-/// whitespace (the indent of the next code line). Leaves any
-/// horizontal whitespace and prior bytes intact. Used to collapse one
-/// unit of redundant blank-line padding when both sides of a removed
-/// comment block had at least one blank line in the source.
 fn pop_one_trailing_newline(s: &mut String) {
     let bytes = s.as_bytes();
     let mut indent_start = bytes.len();
@@ -844,20 +823,10 @@ fn pop_one_trailing_newline(s: &mut String) {
     let newline_pos = indent_start - 1;
     s.remove(newline_pos);
 }
-/// True iff `prefix` ends with a sequence that includes no characters
-/// other than horizontal whitespace since the most recent `\n` (or the
-/// start of input). Caller passes the source bytes up to but excluding
-/// the comment whose blankness is being judged.
 fn line_was_blank_before(prefix: &str) -> bool {
     let line_start = prefix.rfind('\n').map_or(0, |p| p + 1);
     prefix[line_start..].chars().all(|c| c == ' ' || c == '\t')
 }
-/// In-place: drop any trailing run of horizontal whitespace from `s`,
-/// leaving prior `\n` and earlier content intact. Used to clean up the
-/// indentation that preceded a stripped solo-line comment so the
-/// collapse leaves no trailing-whitespace residue, and to trim the
-/// inline whitespace between code and a removed mid-line comment.
-/// Returns the number of characters popped.
 fn trim_trailing_whitespace_to_last_newline(s: &mut String) -> usize {
     let mut popped = 0;
     while matches!(s.chars().last(), Some(' ' | '\t')) {
@@ -866,21 +835,11 @@ fn trim_trailing_whitespace_to_last_newline(s: &mut String) -> usize {
     }
     popped
 }
-/// One byte-range replacement against the original source.
-///
-/// `range` is a byte range in the original source string; `replacement`
-/// is the substitute. Splices are applied in reverse start-order so
-/// earlier offsets are not invalidated by later mutations.
 #[derive(Debug, Clone)]
 struct DocSplice {
     range: std::ops::Range<usize>,
     replacement: String,
 }
-/// Apply `splices` to `original` and return the rewritten source.
-///
-/// Splices must not overlap. Applied in reverse order of start byte
-/// so each application leaves the not-yet-applied splices' offsets
-/// valid.
 fn apply_splices(original: &str, mut splices: Vec<DocSplice>) -> String {
     splices.sort_by_key(|s| std::cmp::Reverse(s.range.start));
     let mut out = original.to_string();
@@ -889,17 +848,6 @@ fn apply_splices(original: &str, mut splices: Vec<DocSplice>) -> String {
     }
     out
 }
-/// Walk `ast`, collect a [`DocSplice`] for every doc surface whose
-/// payload changes under [`rewrite_rustdoc_link_idioms`].
-///
-/// Surfaces handled: file-level inner attributes (`#![doc = "..."]`,
-/// `//!`); per-item attributes (`#[doc = "..."]`, `///`) grouped by
-/// run; `cfg_attr(_, doc = "...")` payloads in isolation; trait-item,
-/// impl-item, field, and variant attributes (same model).
-///
-/// Block doc comments (`/** ... */`) are NOT touched — the in-memory
-/// payload and on-disk source bytes diverge (lexer strips leading
-/// `*`).
 fn collect_doc_splices(ast: &syn::File, original: &str) -> Vec<DocSplice> {
     let mut out = Vec::new();
     collect_attr_run_splices(&ast.attrs, original, &mut out);
@@ -1006,12 +954,6 @@ const fn impl_item_attrs(item: &syn::ImplItem) -> Option<&Vec<Attribute>> {
         _ => return None,
     })
 }
-/// Group `attrs` into contiguous runs of safe-to-splice doc payloads
-/// and emit one [`DocSplice`] per literal whose rewrite differs from
-/// the original payload text.
-///
-/// "Safe to splice" excludes block doc comments (`/** ... */`); the
-/// run is broken on encountering one or on any non-doc attribute.
 fn collect_attr_run_splices(attrs: &[Attribute], original: &str, out: &mut Vec<DocSplice>) {
     let mut i = 0;
     while i < attrs.len() {
@@ -1032,14 +974,6 @@ fn collect_attr_run_splices(attrs: &[Attribute], original: &str, out: &mut Vec<D
 enum DocShape {
     SafeLineOrAttr,
 }
-/// Return the byte-range and shape of a doc literal's storage in
-/// `original` if `attr` is one of:
-///
-/// - `///` / `//!` (line doc, range covers the whole `///`+payload line)
-/// - `#[doc = "…"]` / `#![doc = "…"]` (range covers the quoted literal token)
-///
-/// Returns `None` for non-`doc` attributes, `cfg_attr`, and block
-/// doc comments (`/** … */`).
 fn doc_attr_literal_span(
     attr: &Attribute,
     original: &str,
@@ -1079,10 +1013,6 @@ enum DocLiteralKind {
     InnerLine,
     QuotedAttr,
 }
-/// Classify the source-byte form of a doc literal.
-///
-/// Returns `None` for block doc comments (`/** … */`) — these are
-/// deliberately left untouched by the safe path.
 fn classify_doc_literal(body: &str) -> Option<DocLiteralKind> {
     if body.starts_with("///") && !body.starts_with("////") {
         Some(DocLiteralKind::OuterLine)
@@ -1094,15 +1024,6 @@ fn classify_doc_literal(body: &str) -> Option<DocLiteralKind> {
         None
     }
 }
-/// Emit splices for a run of contiguous doc literals.
-///
-/// All literals in `run` are spliceable line- or attribute-form docs
-/// (i.e. classified by [`classify_doc_literal`]). The run is joined with
-/// `\n`, transformed once so the fenced-code tracker sees the whole block,
-/// then split back into the same number of lines. Each line is individually
-/// spliced (its quoted form for `#[doc = …]`, or its `///`/`//!`-prefixed
-/// form for line docs) so non-doc bytes between docs in the run are
-/// preserved verbatim.
 fn emit_run_splices(run: &[Attribute], original: &str, out: &mut Vec<DocSplice>) {
     let sites: Vec<DocLiteralSite> = run
         .iter()
@@ -1145,16 +1066,6 @@ fn emit_run_splices(run: &[Attribute], original: &str, out: &mut Vec<DocSplice>)
         });
     }
 }
-/// Render a replacement for a `///` or `//!` line-doc storage range.
-///
-/// The original `body` is the full `///…` or `//!…` source line. Its
-/// leading marker may be `///`, `////` (impossible — filtered earlier),
-/// or `//!`. We preserve the *exact* marker bytes the source used
-/// (just `///` or `//!`) and substitute the trailing payload with
-/// `new_payload`.
-///
-/// Returns `None` if the body doesn't start with the expected marker
-/// (defensive; should not happen given [`classify_doc_literal`]).
 fn render_line_doc(body: &str, marker: &str, new_payload: &str) -> Option<String> {
     if !body.starts_with(marker) {
         return None;
@@ -1164,17 +1075,9 @@ fn render_line_doc(body: &str, marker: &str, new_payload: &str) -> Option<String
     out.push_str(new_payload);
     Some(out)
 }
-/// Render a properly-quoted Rust string literal for a `#[doc = "…"]`
-/// payload value. Uses [`proc_macro2::Literal::string`] for the
-/// quoting/escaping rules; converts to its source-form via [`ToString`].
 fn render_quoted_doc_literal(value: &str) -> String {
     proc_macro2::Literal::string(value).to_string()
 }
-/// Collect splices for every `#[cfg_attr(_, doc = "…")]` payload in `attrs`.
-///
-/// Each `doc = "…"` payload literal inside a `cfg_attr` list is transformed
-/// in isolation (gating predicates may differ) and spliced at its own
-/// [`syn::LitStr`] byte-range.
 fn collect_cfg_attr_doc_splices(attrs: &[Attribute], original: &str, out: &mut Vec<DocSplice>) {
     for attr in attrs {
         if !is_cfg_attr(attr) {
@@ -1246,7 +1149,6 @@ pub fn single_line(text: &str) -> String {
     push_single_line_str(&mut out, text);
     out
 }
-/// Render a unified diff between `original` and `rewritten` for `path`.
 #[must_use]
 fn unified_diff(path: &Path, original: &str, rewritten: &str, context: usize) -> String {
     let diff = TextDiff::from_lines(original, rewritten);
@@ -1275,7 +1177,6 @@ fn unified_diff(path: &Path, original: &str, rewritten: &str, context: usize) ->
     }
     out
 }
-/// True if `attr` is a `#[cfg_attr(...)]` attribute.
 #[must_use]
 fn is_cfg_attr(attr: &Attribute) -> bool {
     match &attr.meta {
@@ -1328,19 +1229,8 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
     }
     scan
 }
-/// Directories `scan_doc_files` and `.rs` traversal skip wholesale.
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
-/// Allowlisted source-tree directory names. `comment-free` is a Rust-only
-/// tool; only `.rs` files under one of these names anywhere in the path
-/// are eligible for traversal.
 const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
-/// Resolve `root` to the concrete directories [`walk_rs_files`] should descend.
-///
-/// If `root` itself sits inside (or is named) an allowlisted source dir, it
-/// is returned verbatim — the caller already targeted a Rust subtree.
-/// Otherwise `root` is treated as a project/workspace top: its immediate
-/// `crates/` and `src/` children (whichever exist) are returned. An empty
-/// result is valid and means "nothing to process".
 fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
     let in_scope = root
         .components()
@@ -1388,14 +1278,6 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
             })
     })
 }
-/// True if `path` looks like documentation: doc file extension, bare
-/// README/LICENSE-style stem, or living under a top-level `docs/` / `doc/`
-/// directory directly beneath `root`.
-///
-/// The `docs/`/`doc/` rule is **scoped to the first relative component
-/// under `root`**, so `src/docs/mod.rs` or `crates/foo/doc/inner.rs` do
-/// NOT match. This narrows the strip-mode `doc_file_warning` noise to
-/// genuine top-level documentation directories.
 #[must_use]
 fn is_doc_path(path: &Path, root: &Path) -> bool {
     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -1526,9 +1408,6 @@ impl DocLintVisitor {
         }
     }
 }
-/// Concatenate doc payloads from `attrs` (in source order) and return the
-/// combined text plus the approximate source line of the first doc attribute.
-/// `None` if `attrs` carries no doc payloads.
 fn extract_doc_text(attrs: &[Attribute]) -> Option<(String, usize)> {
     let mut parts: Vec<String> = Vec::new();
     let mut first_line: Option<usize> = None;
@@ -1554,7 +1433,6 @@ fn extract_doc_text(attrs: &[Attribute]) -> Option<(String, usize)> {
     let line = first_line?;
     Some((parts.join("\n"), line))
 }
-/// Extract the string payload of a `#[doc = "..."]` attribute, if it is one.
 fn doc_payload(attr: &Attribute) -> Option<String> {
     let Meta::NameValue(nv) = &attr.meta else {
         return None;
@@ -1571,8 +1449,6 @@ fn doc_payload(attr: &Attribute) -> Option<String> {
     };
     Some(s.value())
 }
-/// Extract every `doc = "..."` payload from inside a `#[cfg_attr(<pred>, ...)]`
-/// list, ignoring the predicate. Returns empty vec if none.
 fn cfg_attr_doc_payloads(attr: &Attribute) -> Vec<String> {
     let Meta::List(list) = &attr.meta else {
         return Vec::new();
@@ -1599,11 +1475,6 @@ fn cfg_attr_doc_payloads(attr: &Attribute) -> Vec<String> {
     }
     out
 }
-/// Count words in `doc_text`, excluding fenced code.
-///
-/// Recognises ` ``` ` and `~~~` fences. Fail-closed: if a fence opens but
-/// never closes, returns [`WordCount::FailClosed`] with a whole-text
-/// recount so a malformed doc cannot silently suppress budget checking.
 fn prose_word_count(doc_text: &str) -> WordCount {
     let mut in_fence = false;
     let mut words = 0usize;
@@ -2451,7 +2322,7 @@ mod doc_lint_tests {
 /// - reference definitions ([label]: <url>) and reference links ([label][ref])
 /// - targets with generics, disambiguators, or fragments (< > @ # ( ) ! ?)
 /// - labels already wrapped in backticks (idempotent)
-/// - prose labels — anything not matching is_codeish_token
+/// - prose labels — anything not matching is_codeish_path
 /// - empty link bodies
 /// ```
 #[must_use]
@@ -2482,8 +2353,6 @@ pub fn rewrite_rustdoc_link_idioms(doc_text: &str) -> String {
     }
     out
 }
-/// True if `line` is a Markdown link-reference definition
-/// (`[label]: <target>` at the start of the line, ignoring leading whitespace).
 fn is_reference_definition(line: &str) -> bool {
     let trimmed = line.trim_start();
     let Some(rest) = trimmed.strip_prefix('[') else {
@@ -2494,16 +2363,6 @@ fn is_reference_definition(line: &str) -> bool {
     };
     rest[close + 1..].starts_with(':')
 }
-/// Apply per-link rewrites to one prose `line`, appending to `out`.
-///
-/// Iterates the line scanning for `[`. Code-span backticks are tracked so
-/// `[Type]` inside `` `code` `` is left verbatim. Each candidate link is
-/// classified into [`LinkShape`] and rewritten or skipped accordingly.
-///
-/// Walks `char_indices` so multi-byte UTF-8 sequences round-trip intact.
-/// The bracket / paren matchers operate on ASCII bytes only (`[`, `]`,
-/// `(`, `)`, backslash), so the byte indices they return are always char
-/// boundaries.
 fn rewrite_line_links(line: &str, out: &mut String) {
     let mut chars = line.char_indices().peekable();
     let mut in_code_span = false;
@@ -2533,24 +2392,19 @@ fn rewrite_line_links(line: &str, out: &mut String) {
         }
     }
 }
-/// Markdown link shapes recognised (and possibly rewritten) by
-/// [`rewrite_rustdoc_link_idioms`]. Source spans are preserved verbatim
-/// in the `*_src` fields so unrecognised cases can be re-emitted unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LinkShape {
-    /// `[label](target)` — explicit inline link.
     Inline {
         label_src: String,
         target_src: String,
     },
-    /// `[label][ref]` — reference-style link. Always preserved verbatim.
-    Reference { raw: String },
-    /// `[label]` — shortcut reference / candidate intra-doc link.
-    Shortcut { label_src: String },
+    Reference {
+        raw: String,
+    },
+    Shortcut {
+        label_src: String,
+    },
 }
-/// Parse a link starting at byte offset `start` (which must be `[`).
-/// Returns `Some((shape, bytes_consumed))` if a complete link was parsed,
-/// `None` if the `[` is not part of a recognisable link (e.g. unmatched).
 fn parse_link_at(line: &str, start: usize) -> Option<(LinkShape, usize)> {
     let bytes = line.as_bytes();
     let label_end = find_matching_bracket(line, start)?;
@@ -2574,10 +2428,6 @@ fn parse_link_at(line: &str, start: usize) -> Option<(LinkShape, usize)> {
     }
     Some((LinkShape::Shortcut { label_src }, after_label - start))
 }
-/// Find the matching `]` for the `[` at `open`. Backslash-escaped
-/// brackets are skipped. Nested `[` / `]` inside an item link label
-/// is uncommon; treat the first unescaped `]` as the close. Returns
-/// `None` if no close is found on `line`.
 const fn find_matching_bracket(line: &str, open: usize) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut i = open + 1;
@@ -2594,8 +2444,6 @@ const fn find_matching_bracket(line: &str, open: usize) -> Option<usize> {
     }
     None
 }
-/// Find the matching `)` for the `(` at `open`, respecting backslash
-/// escapes. Returns `None` if no close is found on `line`.
 const fn find_matching_paren(line: &str, open: usize) -> Option<usize> {
     let bytes = line.as_bytes();
     let mut i = open + 1;
@@ -2612,7 +2460,6 @@ const fn find_matching_paren(line: &str, open: usize) -> Option<usize> {
     }
     None
 }
-/// Decide how to re-emit a parsed link.
 fn emit_link(out: &mut String, shape: &LinkShape) {
     match shape {
         LinkShape::Reference { raw } => {
@@ -2625,26 +2472,24 @@ fn emit_link(out: &mut String, shape: &LinkShape) {
         LinkShape::Shortcut { label_src } => emit_shortcut_link(out, label_src),
     }
 }
-/// Re-emit `[label](target)`, possibly with idiom rewrites.
 fn emit_inline_link(out: &mut String, label_src: &str, target_src: &str) {
     let target_trim = target_src.trim();
     if target_trim.is_empty() || !is_safe_intra_doc_target(target_trim) {
         write_inline(out, label_src, target_src);
         return;
     }
-    if label_src == target_trim && is_codeish_token(label_src) {
+    if label_src == target_trim && is_codeish_path(label_src) {
         write_shortcut_ticked(out, label_src);
         return;
     }
-    if is_codeish_token(label_src) && !label_src_has_backticks(label_src) {
+    if is_codeish_path(label_src) && !label_src_has_backticks(label_src) {
         write_inline_label_ticked(out, label_src, target_src);
         return;
     }
     write_inline(out, label_src, target_src);
 }
-/// Re-emit `[label]`, possibly ticking when the label is code-ish.
 fn emit_shortcut_link(out: &mut String, label_src: &str) {
-    if is_codeish_token(label_src) && !label_src_has_backticks(label_src) {
+    if is_codeish_path(label_src) && !label_src_has_backticks(label_src) {
         write_shortcut_ticked(out, label_src);
     } else {
         out.push('[');
@@ -2677,15 +2522,9 @@ fn write_inline(out: &mut String, label: &str, target: &str) {
     out.push_str(target);
     out.push(')');
 }
-/// True if the label already contains literal backticks. Such labels
-/// are left verbatim — the user has already chosen their wrapping.
 fn label_src_has_backticks(label: &str) -> bool {
     label.contains('`')
 }
-/// True if `target` is a safe intra-doc-link target for mechanical
-/// rewrite: no URL scheme, no fragment, no generic / disambiguator /
-/// argument syntax. Pure paths of identifiers separated by `::`,
-/// optionally prefixed with `crate`, `self`, `super`, or `Self`.
 fn is_safe_intra_doc_target(target: &str) -> bool {
     if target.is_empty() {
         return false;
@@ -2705,16 +2544,6 @@ fn is_safe_intra_doc_target(target: &str) -> bool {
     }
     is_codeish_path(target)
 }
-/// True if `s` is a single code-ish Rust item token:
-/// `CamelCase`, `snake_case` identifier, path-with-`::`,
-/// or one of `Self` / `self` / `super` / `crate`.
-#[must_use]
-fn is_codeish_token(s: &str) -> bool {
-    is_codeish_path(s)
-}
-/// True if `s` is a syntactically plausible Rust path:
-/// `::`-separated segments, each segment a non-empty ident
-/// (`[A-Za-z_][A-Za-z0-9_]*`). Leading `::` is permitted.
 fn is_codeish_path(s: &str) -> bool {
     if s.is_empty() {
         return false;
@@ -2745,7 +2574,7 @@ fn is_rust_ident(s: &str) -> bool {
 }
 #[cfg(test)]
 mod rustdoc_link_idiom_tests {
-    use super::{is_codeish_token, rewrite_rustdoc_link_idioms};
+    use super::{is_codeish_path, rewrite_rustdoc_link_idioms};
     #[test]
     fn multibyte_utf8_survives_rewrite_pure() {
         let input = "see [Type] — also русский and 🦀";
@@ -2889,24 +2718,24 @@ mod rustdoc_link_idiom_tests {
         assert_eq!(rw("a [Type]() blank"), "a [Type]() blank");
     }
     #[test]
-    fn is_codeish_token_basic() {
-        assert!(is_codeish_token("Type"));
-        assert!(is_codeish_token("foo_bar"));
-        assert!(is_codeish_token("foo::Bar"));
-        assert!(is_codeish_token("Self"));
-        assert!(is_codeish_token("self"));
-        assert!(is_codeish_token("super::Foo"));
-        assert!(is_codeish_token("crate::Reader"));
-        assert!(is_codeish_token("::foo::Bar"));
-        assert!(!is_codeish_token(""));
-        assert!(!is_codeish_token("two words"));
-        assert!(!is_codeish_token("foo()"));
-        assert!(!is_codeish_token("Vec<u8>"));
-        assert!(!is_codeish_token("foo!"));
-        assert!(!is_codeish_token("_"));
-        assert!(!is_codeish_token("9bad"));
-        assert!(!is_codeish_token("foo:bar"));
-        assert!(!is_codeish_token("foo::"));
+    fn is_codeish_path_basic() {
+        assert!(is_codeish_path("Type"));
+        assert!(is_codeish_path("foo_bar"));
+        assert!(is_codeish_path("foo::Bar"));
+        assert!(is_codeish_path("Self"));
+        assert!(is_codeish_path("self"));
+        assert!(is_codeish_path("super::Foo"));
+        assert!(is_codeish_path("crate::Reader"));
+        assert!(is_codeish_path("::foo::Bar"));
+        assert!(!is_codeish_path(""));
+        assert!(!is_codeish_path("two words"));
+        assert!(!is_codeish_path("foo()"));
+        assert!(!is_codeish_path("Vec<u8>"));
+        assert!(!is_codeish_path("foo!"));
+        assert!(!is_codeish_path("_"));
+        assert!(!is_codeish_path("9bad"));
+        assert!(!is_codeish_path("foo:bar"));
+        assert!(!is_codeish_path("foo::"));
     }
     #[test]
     fn idempotent_rewrite() {

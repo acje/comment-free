@@ -1,8 +1,3 @@
-//! Property tests pinning the parser invariants the example suite asserts
-//! only at fixed points: total-ness on arbitrary UTF-8, byte preservation
-//! outside dropped comments and rewritten link spans, idempotence, and
-//! fenced-block balance.
-
 use comment_free::{rewrite_rustdoc_link_idioms, single_line, strip_line_comments};
 use proptest::collection::vec;
 use proptest::prelude::{Just, Strategy, any, prop_oneof, proptest};
@@ -15,6 +10,134 @@ fn config() -> Config {
         cases: CASES,
         ..Config::default()
     }
+}
+
+const STRIP_MODEL_PIECES: &[(&str, Option<&str>)] = &[
+    ("let x = 1;", Some("let x = 1;")),
+    ("    let y = 2;", Some("    let y = 2;")),
+    ("fn f() {}", Some("fn f() {}")),
+    ("struct S { a: u32 }", Some("struct S { a: u32 }")),
+    ("let s = \"a // b\";", Some("let s = \"a // b\";")),
+    (
+        "let t = \"/* not a comment */\";",
+        Some("let t = \"/* not a comment */\";"),
+    ),
+    (
+        "let u = r#\"raw // text\"#;",
+        Some("let u = r#\"raw // text\"#;"),
+    ),
+    ("/// doc line", Some("/// doc line")),
+    ("//! inner doc line", Some("//! inner doc line")),
+    ("/** block doc */", Some("/** block doc */")),
+    ("\tlet tabbed = 3;", Some("\tlet tabbed = 3;")),
+    ("// solo note", None),
+    ("    // indented note", None),
+    ("/* block */", None),
+    ("/* multi\n   still inside */", None),
+    ("let z = 3; // trailing note", Some("let z = 3;")),
+    ("let w = 4; /* inline block */", Some("let w = 4;")),
+];
+
+const STRIP_BLANK_PIECES: &[(&str, Option<&str>)] = &[("", Some("")), ("    ", Some("    "))];
+
+const REWRITE_SPAN_PIECES: &[(&str, &str)] = &[
+    ("", ""),
+    (
+        "Summary prose without any link.",
+        "Summary prose without any link.",
+    ),
+    ("See [Type](Type) for details.", "See [`Type`] for details."),
+    ("See [Type] for details.", "See [`Type`] for details."),
+    (
+        "See [label](Target) for details.",
+        "See [`label`](Target) for details.",
+    ),
+    (
+        "Already ticked [`Type`] stays put.",
+        "Already ticked [`Type`] stays put.",
+    ),
+    (
+        "A [link](https://example.com) target.",
+        "A [link](https://example.com) target.",
+    ),
+    ("Use [ref][ref] here.", "Use [ref][ref] here."),
+    (
+        "Inline `code [Type](Type) span` here.",
+        "Inline `code [Type](Type) span` here.",
+    ),
+    ("> quoted [Type] line", "> quoted [`Type`] line"),
+    ("- list [Type] item", "- list [`Type`] item"),
+    (
+        "  indented prose without a link opener",
+        "  indented prose without a link opener",
+    ),
+    (
+        "See [module::Type] for details.",
+        "See [`module::Type`] for details.",
+    ),
+    ("Escaped \\[Type] stays.", "Escaped \\[Type] stays."),
+];
+
+fn strip_piece_indices(len: usize) -> impl Strategy<Value = Vec<usize>> {
+    vec(0..len, 0..12)
+}
+
+fn strip_source(indices: &[usize], table: &[(&str, Option<&str>)]) -> String {
+    indices
+        .iter()
+        .map(|index| table[*index].0)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_expected_output(indices: &[usize], table: &[(&str, Option<&str>)]) -> String {
+    let mut out = String::new();
+    let mut suppress_separator = false;
+    for (position, index) in indices.iter().enumerate() {
+        if position > 0 && !suppress_separator {
+            out.push('\n');
+        }
+        suppress_separator = false;
+        match table[*index].1 {
+            Some(kept) => out.push_str(kept),
+            None => {
+                if position + 1 < indices.len() {
+                    suppress_separator = true;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn non_whitespace(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn blanks_table() -> Vec<(&'static str, Option<&'static str>)> {
+    let mut table = STRIP_MODEL_PIECES.to_vec();
+    table.extend_from_slice(STRIP_BLANK_PIECES);
+    table
+}
+
+fn rewrite_span_indices() -> impl Strategy<Value = Vec<usize>> {
+    vec(0..REWRITE_SPAN_PIECES.len(), 0..14)
+}
+
+fn rewrite_source(indices: &[usize]) -> String {
+    indices
+        .iter()
+        .map(|index| REWRITE_SPAN_PIECES[*index].0)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn rewrite_expected_output(indices: &[usize]) -> String {
+    indices
+        .iter()
+        .map(|index| REWRITE_SPAN_PIECES[*index].1)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn comment_free_line() -> impl Strategy<Value = String> {
@@ -122,6 +245,32 @@ proptest! {
     }
 
     #[test]
+    fn strip_equals_independent_model_that_removes_only_comment_pieces(
+        indices in strip_piece_indices(STRIP_MODEL_PIECES.len()),
+    ) {
+        let src = strip_source(&indices, STRIP_MODEL_PIECES);
+        let expected = strip_expected_output(&indices, STRIP_MODEL_PIECES);
+        assert_eq!(strip_line_comments(&src), expected);
+    }
+
+    #[test]
+    fn strip_preserves_every_non_comment_non_whitespace_byte_across_blank_lines(
+        indices in strip_piece_indices(STRIP_MODEL_PIECES.len() + STRIP_BLANK_PIECES.len()),
+    ) {
+        let table = blanks_table();
+        let src = strip_source(&indices, &table);
+        let kept: String = indices
+            .iter()
+            .filter_map(|index| table[*index].1)
+            .collect::<Vec<_>>()
+            .concat();
+        assert_eq!(
+            non_whitespace(&strip_line_comments(&src)),
+            non_whitespace(&kept)
+        );
+    }
+
+    #[test]
     fn strip_is_idempotent_on_rust_shaped_source(src in rust_source()) {
         let once = strip_line_comments(&src);
         assert_eq!(strip_line_comments(&once), once);
@@ -136,6 +285,15 @@ proptest! {
     #[test]
     fn rewrite_never_panics_on_arbitrary_utf8(doc in any::<String>()) {
         let _ = rewrite_rustdoc_link_idioms(&doc);
+    }
+
+    #[test]
+    fn rewrite_equals_independent_model_of_allowed_link_span_edits(
+        indices in rewrite_span_indices(),
+    ) {
+        let doc = rewrite_source(&indices);
+        let expected = rewrite_expected_output(&indices);
+        assert_eq!(rewrite_rustdoc_link_idioms(&doc), expected);
     }
 
     #[test]

@@ -1129,11 +1129,14 @@ fn collect_cfg_attr_list_doc_splices(
     original: &str,
     out: &mut Vec<DocSplice>,
 ) {
-    let Ok(metas) = cfg_meta_args(list) else {
+    let Ok(args) = cfg_predicate_args(list) else {
         return;
     };
-    for meta in metas.iter().skip(1) {
-        match meta {
+    for arg in args.iter().skip(1) {
+        let CfgPredicate::Meta(meta) = arg else {
+            continue;
+        };
+        match &**meta {
             Meta::List(inner) if inner.path.is_ident("cfg_attr") => {
                 collect_cfg_attr_list_doc_splices(inner, original, out);
             }
@@ -1727,11 +1730,32 @@ impl CfgTruth {
         }
     }
 }
-fn fold_cfg_predicate(meta: &Meta) -> CfgTruth {
+/// One argument of a `cfg`-style predicate list, which rustc accepts as
+/// either a boolean literal or a `Meta` (path, `key = "value"`, or a
+/// `all`/`any`/`not` list). `syn::Meta` alone cannot hold `true` or
+/// `false`, because they are keywords rather than paths.
+enum CfgPredicate {
+    Bool(bool),
+    Meta(Box<Meta>),
+}
+impl syn::parse::Parse for CfgPredicate {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        if input.peek(syn::LitBool) {
+            return Ok(Self::Bool(input.parse::<syn::LitBool>()?.value()));
+        }
+        Ok(Self::Meta(Box::new(input.parse()?)))
+    }
+}
+fn fold_cfg_predicate(predicate: &CfgPredicate) -> CfgTruth {
+    let meta = match predicate {
+        CfgPredicate::Bool(true) => return CfgTruth::Always,
+        CfgPredicate::Bool(false) => return CfgTruth::Never,
+        CfgPredicate::Meta(meta) => &**meta,
+    };
     let Meta::List(list) = meta else {
         return CfgTruth::Unresolved;
     };
-    let Ok(inner) = cfg_meta_args(list) else {
+    let Ok(inner) = cfg_predicate_args(list) else {
         return CfgTruth::Unresolved;
     };
     if list.path.is_ident("all") {
@@ -1749,7 +1773,7 @@ fn fold_cfg_predicate(meta: &Meta) -> CfgTruth {
         _ => CfgTruth::Unresolved,
     }
 }
-fn cfg_meta_args(list: &syn::MetaList) -> syn::Result<Punctuated<Meta, Token![,]>> {
+fn cfg_predicate_args(list: &syn::MetaList) -> syn::Result<Punctuated<CfgPredicate, Token![,]>> {
     list.parse_args_with(Punctuated::parse_terminated)
 }
 fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
@@ -1762,19 +1786,22 @@ fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
     collect_cfg_attr_list_doc_parts(list, CfgTruth::Always, out);
 }
 fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &mut Vec<DocPart>) {
-    let Ok(metas) = cfg_meta_args(list) else {
+    let Ok(args) = cfg_predicate_args(list) else {
         return;
     };
-    let mut metas = metas.into_iter();
-    let Some(predicate) = metas.next() else {
+    let mut args = args.into_iter();
+    let Some(predicate) = args.next() else {
         return;
     };
     let truth = outer.and(fold_cfg_predicate(&predicate));
     let Some(origin) = truth.doc_origin() else {
         return;
     };
-    for meta in metas {
-        match &meta {
+    for arg in args {
+        let CfgPredicate::Meta(meta) = arg else {
+            continue;
+        };
+        match &*meta {
             Meta::NameValue(nv) if nv.path.is_ident("doc") => {
                 if let syn::Expr::Lit(syn::ExprLit {
                     lit: syn::Lit::Str(s),
@@ -2636,6 +2663,40 @@ mod doc_lint_tests {
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
         assert_eq!(r.findings()[0].words().count(), 10);
+    }
+    #[test]
+    fn a_literal_true_cfg_attr_doc_is_a_finding() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(true, doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+            pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+        assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
+        assert_eq!(r.findings()[0].words().count(), 10);
+    }
+    #[test]
+    fn a_literal_false_cfg_attr_doc_carries_no_words() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(false, doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+            pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+    }
+    #[test]
+    fn literal_boolean_predicates_fold_through_all_any_and_not() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(all(true), doc = " w01 w02 w03 w04 w05")] #[cfg_attr(any(true, unix),
+            doc = " w06 w07 w08 w09 w10")] #[cfg_attr(not(false), cfg_attr(true, doc =
+            " x01 x02 x03 x04 x05"))] #[cfg_attr(any(false), doc =
+            " y01 y02 y03 y04 y05 y06 y07 y08 y09 y10")] pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+        assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
+        assert_eq!(r.findings()[0].words().count(), 15);
     }
     #[test]
     fn a_file_level_trivially_true_cfg_attr_doc_is_a_finding() {

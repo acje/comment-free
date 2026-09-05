@@ -1072,6 +1072,78 @@ fn a_trivially_false_cfg_attr_doc_is_neither_finding_nor_undecided() {
     );
 }
 #[test]
+fn a_literal_true_cfg_attr_doc_reaches_exit_four() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#[cfg_attr(true, doc = \"{long}\")]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "cfg_attr(true, ...) applies the doc unconditionally\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.number("words"), 90);
+}
+#[test]
+fn a_file_level_literal_true_cfg_attr_doc_reaches_exit_four() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#![cfg_attr(true, doc = \"{long}\")]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a file-level cfg_attr(true, ...) doc is unconditional\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.text("item"), "file-level");
+    assert_eq!(finding.number("words"), 90);
+}
+#[test]
+fn a_nested_literal_boolean_cfg_attr_doc_reaches_exit_four() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!(
+        "#[cfg_attr(all(true), cfg_attr(not(false), doc = \"{long}\"))]\npub fn f() {{}}\n"
+    );
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "all(true)/not(false) fold to unconditional\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.number("words"), 90);
+}
+#[test]
+fn a_literal_false_cfg_attr_doc_is_neither_finding_nor_undecided() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!("#[cfg_attr(false, doc = \"{long}\")]\npub fn f() {{}}\n");
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stdout}{stderr}");
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("findings"), 0);
+    assert_eq!(
+        summary.number("undecided"),
+        0,
+        "cfg_attr(false, ...) applies in no configuration:\n{stderr}"
+    );
+}
+#[test]
 fn an_overlong_unconditional_doc_beside_cfg_docs_is_still_a_finding() {
     let td = tempfile::tempdir().unwrap();
     let long = prose_words("w", 90);

@@ -8,7 +8,7 @@ use comment_free::{
     process_file, rewrite_file_record, rewrite_summary_record, run_error_record, scan_doc_files,
     strip_summary_record, walk_rs_files,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 #[derive(Parser, Debug)]
 #[command(
@@ -146,12 +146,50 @@ fn report_argv_rejection(rejection: &ArgvRejection) -> ExitCode {
     }
 }
 
+/// What the parsed argv asked the tool to do.
+///
+/// `Options` is the argv surface clap needs: a flat bag of flags whose
+/// legal combinations are enforced by `requires` attributes at parse
+/// time. Every path past [`Options::into_command`] takes this instead,
+/// so no later code can pair a diff width with a lint run or a word
+/// budget with a rewrite.
+enum Command {
+    Lint { root: PathBuf, budget: DocBudget },
+    Rewrite { root: PathBuf, mode: RewriteMode },
+}
+impl Command {
+    fn from_options(opts: Options) -> Result<Self, CommentFreeError> {
+        if !opts.root.is_dir() {
+            return Err(CommentFreeError::NotADirectory);
+        }
+        Ok(if opts.rewrite {
+            Self::Rewrite {
+                root: opts.root,
+                mode: if opts.dry_run {
+                    RewriteMode::DryRun {
+                        context: opts.context,
+                    }
+                } else {
+                    RewriteMode::Write
+                },
+            }
+        } else {
+            Self::Lint {
+                root: opts.root,
+                budget: DocBudget {
+                    max_words: opts.doc_max_words,
+                },
+            }
+        })
+    }
+}
+
 fn main() -> ExitCode {
     let opts = match parse_options() {
         Ok(o) => o,
         Err(rejection) => return report_argv_rejection(&rejection),
     };
-    match run(&opts) {
+    match dispatch(opts) {
         Ok(0) => ExitCode::SUCCESS,
         Ok(_) => ExitCode::from(5),
         Err(e) => {
@@ -160,26 +198,27 @@ fn main() -> ExitCode {
         }
     }
 }
-fn run(opts: &Options) -> Result<u32, CommentFreeError> {
-    if !opts.root.is_dir() {
-        return Err(CommentFreeError::NotADirectory);
-    }
-    if opts.rustdoc_link_idioms {
+fn dispatch(opts: Options) -> Result<u32, CommentFreeError> {
+    let deprecated_alias = opts.rustdoc_link_idioms;
+    let command = Command::from_options(opts)?;
+    if deprecated_alias {
         eprintln!(
             "warning: --rustdoc-link-idioms is deprecated; the default --rewrite path now \
              includes rustdoc-link idiom canonicalisation along with lexer-based comment \
              stripping. This flag is a no-op alias retained for one release."
         );
     }
-    if opts.rewrite {
-        Ok(run_strip(opts))
-    } else {
-        run_lint(opts)
+    run(&command)
+}
+fn run(command: &Command) -> Result<u32, CommentFreeError> {
+    match command {
+        Command::Rewrite { root, mode } => Ok(run_strip(root, *mode)),
+        Command::Lint { root, budget } => run_lint(root, *budget),
     }
 }
-fn run_strip(opts: &Options) -> u32 {
+fn run_strip(root: &Path, mode: RewriteMode) -> u32 {
     let mut errors = 0u32;
-    let doc_scan = scan_doc_files(&opts.root);
+    let doc_scan = scan_doc_files(root);
     for path in &doc_scan.files {
         eprintln!("{}", doc_file_warning_record(path));
     }
@@ -190,17 +229,10 @@ fn run_strip(opts: &Options) -> u32 {
             run_error_record(RunErrorKind::Walk, e.path(), &e.message())
         );
     }
-    let mode = if opts.dry_run {
-        RewriteMode::DryRun {
-            context: opts.context,
-        }
-    } else {
-        RewriteMode::Write
-    };
     let mut rewritten = 0u32;
     let mut unchanged = 0u32;
     let mut counts_total = RewriteCounts::default();
-    for walked in walk_rs_files(&opts.root) {
+    for walked in walk_rs_files(root) {
         let path = match walked {
             Ok(p) => p,
             Err(e) => {
@@ -247,14 +279,11 @@ fn run_strip(opts: &Options) -> u32 {
 /// window"; the hard contract is the truncation record, not the cap value.
 const DOC_LINT_HINT_CAP: usize = 50;
 
-fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
-    let budget = DocBudget {
-        max_words: opts.doc_max_words,
-    };
+fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
     let mut all_findings: Vec<(std::path::PathBuf, comment_free::DocFinding)> = Vec::new();
     let mut errors = 0u32;
     let mut files_scanned = 0u32;
-    for walked in walk_rs_files(&opts.root) {
+    for walked in walk_rs_files(root) {
         let path = match walked {
             Ok(p) => p,
             Err(e) => {

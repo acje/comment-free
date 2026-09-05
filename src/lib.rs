@@ -252,6 +252,12 @@ impl From<&CommentFreeError> for ExitCode {
 /// The diff and the on-disk write are separate variants because they
 /// are separate events: a [`RewriteMode::Write`] run never has a diff
 /// to report, and a [`RewriteMode::DryRun`] run always does.
+///
+/// Deliberately **not** `#[non_exhaustive]`. Callers must handle every
+/// outcome — a file that was neither rewritten, left alone, nor
+/// reported as failed has been silently dropped — so a future variant
+/// should fail their build rather than fall into a wildcard arm. The
+/// growable half of this contract is [`FileError`].
 #[derive(Debug)]
 pub enum FileOutcome {
     /// Write mode: the new content replaced the file on disk.
@@ -1242,7 +1248,7 @@ pub fn single_line(text: &str) -> String {
 }
 /// Render a unified diff between `original` and `rewritten` for `path`.
 #[must_use]
-pub fn unified_diff(path: &Path, original: &str, rewritten: &str, context: usize) -> String {
+fn unified_diff(path: &Path, original: &str, rewritten: &str, context: usize) -> String {
     let diff = TextDiff::from_lines(original, rewritten);
     let mut out = String::new();
     out.push_str("--- a/");
@@ -1271,7 +1277,7 @@ pub fn unified_diff(path: &Path, original: &str, rewritten: &str, context: usize
 }
 /// True if `attr` is a `#[cfg_attr(...)]` attribute.
 #[must_use]
-pub fn is_cfg_attr(attr: &Attribute) -> bool {
+fn is_cfg_attr(attr: &Attribute) -> bool {
     match &attr.meta {
         Meta::List(list) => list.path.is_ident("cfg_attr"),
         _ => false,
@@ -1323,7 +1329,7 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
     scan
 }
 /// Directories `scan_doc_files` and `.rs` traversal skip wholesale.
-pub const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
+const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
 /// Allowlisted source-tree directory names. `comment-free` is a Rust-only
 /// tool; only `.rs` files under one of these names anywhere in the path
 /// are eligible for traversal.
@@ -1353,7 +1359,7 @@ fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
 ///
 /// Restricts traversal to `.rs` under allowlisted Rust source roots
 /// (`crates/`, `src/`) — `comment-free` is a Rust-only tool. Within those
-/// roots, [`SKIP_DIRS`] (notably nested `target/`) still prune build output.
+/// roots, build-output directories (notably nested `target/`) are still pruned.
 /// An unreadable entry surfaces as [`WalkError`], never as "no entry".
 pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
     resolve_walk_roots(root).into_iter().flat_map(|base| {
@@ -1391,7 +1397,7 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
 /// NOT match. This narrows the strip-mode `doc_file_warning` noise to
 /// genuine top-level documentation directories.
 #[must_use]
-pub fn is_doc_path(path: &Path, root: &Path) -> bool {
+fn is_doc_path(path: &Path, root: &Path) -> bool {
     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
         let ext_lc = ext.to_ascii_lowercase();
         if matches!(
@@ -1436,6 +1442,12 @@ const BARE_DOC_STEMS: &[&str] = &[
 /// `~~~`) and do not count toward the prose word budget. The linter has
 /// no semantic notion of an "example" — fence delimiters are the only
 /// signal — and enforces no limit on how many a doc comment may carry.
+///
+/// Every `usize` is a legal budget, including zero, so there is no
+/// invalid state to exclude and nothing to encapsulate. Deliberately
+/// **not** `#[non_exhaustive]`: callers construct it, and a second
+/// budget dimension would be a policy change they must react to rather
+/// than a field they can ignore.
 #[derive(Debug, Clone, Copy)]
 pub struct DocBudget {
     /// Maximum words allowed per doc comment (prose only; fenced code,
@@ -1443,6 +1455,12 @@ pub struct DocBudget {
     pub max_words: usize,
 }
 /// Result of counting prose words in a doc comment.
+///
+/// Deliberately **not** `#[non_exhaustive]`: these two variants are the
+/// closed domain of a completed count, and callers that do not need the
+/// distinction already have [`WordCount::count`] and
+/// [`WordCount::is_fail_closed`]. An outcome the linter could not
+/// decide is a [`DocLintOutcome`] variant, not a third count.
 #[derive(Debug, Clone, Copy)]
 pub enum WordCount {
     /// Fence state was balanced; `count` excludes fenced code.
@@ -1469,7 +1487,12 @@ impl WordCount {
 ///
 /// The count and its fail-closed provenance are one value, not a
 /// number beside a boolean that could contradict it.
+///
+/// Only [`doc_lint_file`] constructs one, so the type is
+/// `#[non_exhaustive]`: a later finding dimension is an added field,
+/// not a breaking change for the callers that only read it.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DocFinding {
     /// Human-readable label for the docced item, e.g. `"fn foo"` or `"struct Bar"`.
     pub item_label: String,
@@ -2394,7 +2417,7 @@ mod doc_lint_tests {
 /// (single-backtick pairs).
 ///
 /// Rules applied only when the label is a conservative Rust item
-/// token (see [`is_codeish_token`]):
+/// token:
 ///
 /// ```text
 /// [Type](Type)             -> [`Type`]              (redundant target collapsed)
@@ -2669,7 +2692,7 @@ fn is_safe_intra_doc_target(target: &str) -> bool {
 /// `CamelCase`, `snake_case` identifier, path-with-`::`,
 /// or one of `Self` / `self` / `super` / `crate`.
 #[must_use]
-pub fn is_codeish_token(s: &str) -> bool {
+fn is_codeish_token(s: &str) -> bool {
     is_codeish_path(s)
 }
 /// True if `s` is a syntactically plausible Rust path:

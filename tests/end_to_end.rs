@@ -3454,6 +3454,24 @@ fn help_and_version_emit_no_column_zero_record_lines() {
 }
 
 #[test]
+fn long_help_documents_every_exit_code_the_tool_returns() {
+    let out = run_argv(&["--help"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let table = stdout
+        .split_once("Exit codes:")
+        .expect("long help carries an exit-code table")
+        .1;
+    for code in ["0", "1", "2", "3", "4", "5"] {
+        assert!(
+            table
+                .lines()
+                .any(|l| l.trim_start().starts_with(&format!("{code}  "))),
+            "exit code {code} is missing from the long help table:\n{table}"
+        );
+    }
+}
+
+#[test]
 fn single_line_collapses_hostile_prose_to_one_line() {
     let hostile = format!("io error: bad thing\n{FORGED}\r\ttail\u{7f}\u{1}");
     let rendered = comment_free::single_line(&hostile);

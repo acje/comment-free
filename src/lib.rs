@@ -1174,14 +1174,29 @@ fn is_cfg_attr(attr: &Attribute) -> bool {
     }
 }
 /// Result of [`scan_doc_files`]: the documentation files found, plus
-/// every traversal failure encountered. Callers must count `errors`
-/// towards the run error total; a scan that could not read part of the
-/// tree has not established that the tree is clean.
-#[derive(Debug, Default)]
+/// every traversal failure encountered. Callers must count
+/// [`DocScan::errors`] towards the run error total; a scan that could
+/// not read part of the tree has not established that the tree is clean.
+///
+/// Has no public constructor: a scan is evidence of a traversal this
+/// crate performed, not a value a caller can assert.
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct DocScan {
-    pub files: Vec<PathBuf>,
-    pub errors: Vec<WalkError>,
+    files: Vec<PathBuf>,
+    errors: Vec<WalkError>,
+}
+impl DocScan {
+    /// Documentation files the scan found.
+    #[must_use]
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+    /// Traversal failures the scan could not resolve into an entry.
+    #[must_use]
+    pub fn errors(&self) -> &[WalkError] {
+        &self.errors
+    }
 }
 /// Walk `root` and report every file that looks like documentation,
 /// together with every traversal failure.
@@ -1191,7 +1206,10 @@ pub struct DocScan {
 /// Unreadable entries are reported in [`DocScan::errors`], never dropped.
 #[must_use]
 pub fn scan_doc_files(root: &Path) -> DocScan {
-    let mut scan = DocScan::default();
+    let mut scan = DocScan {
+        files: Vec::new(),
+        errors: Vec::new(),
+    };
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -1348,19 +1366,38 @@ impl WordCount {
 /// A single doc-comment over-budget finding emitted by [`doc_lint_file`].
 ///
 /// The count carries its own fail-closed provenance rather than sitting
-/// beside a boolean that could contradict it.
+/// beside a boolean that could contradict it. Has no public
+/// constructor: a finding is evidence of a lint this crate ran.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct DocFinding {
-    /// Human-readable label for the docced item, e.g. `"fn foo"` or `"struct Bar"`.
-    pub item_label: String,
-    /// Approximate source line of the docced item (from `proc_macro2` spans).
-    pub line: usize,
+    item_label: String,
+    line: usize,
+    words: WordCount,
+    budget: usize,
+}
+impl DocFinding {
+    /// Human-readable label for the docced item, e.g. `"fn foo"`.
+    #[must_use]
+    pub fn item_label(&self) -> &str {
+        &self.item_label
+    }
+    /// Approximate source line of the docced item.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
     /// Prose word count of the item's doc comment, carrying whether it
     /// came from the fail-closed recount path.
-    pub words: WordCount,
+    #[must_use]
+    pub const fn words(&self) -> WordCount {
+        self.words
+    }
     /// The budget the count exceeded.
-    pub budget: usize,
+    #[must_use]
+    pub const fn budget(&self) -> usize {
+        self.budget
+    }
 }
 /// Lint `ast` for doc-comments whose prose word count exceeds `budget.max_words`.
 ///

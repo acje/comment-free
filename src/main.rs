@@ -80,31 +80,47 @@ use std::process::ExitCode;
 struct Options {
     #[arg(default_value = ".", value_name = "ROOT")]
     root: PathBuf,
-    /// Run the byte-preserving rewrite passes over every `.rs` file
-    /// under ROOT: canonicalise rustdoc-link idioms in doc payloads,
-    /// then strip every non-doc `//` and `/* */` comment via the rustc
-    /// lexer. Doc comments are preserved; nothing else is.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Run the byte-preserving rewrite passes over every `.rs` file under ROOT: \
+                canonicalise rustdoc-link idioms in doc payloads, then strip every non-doc \
+                `//` and `/* */` comment via the rustc lexer. Doc comments are preserved; \
+                nothing else is"
+    )]
     rewrite: bool,
-    /// Preview the rewrite as a unified diff without modifying files.
-    /// Only meaningful with `--rewrite`. Default (lint) mode is
-    /// already read-only; `--dry-run` is meaningful only with
-    /// `--rewrite` (enforced by clap).
-    #[arg(long, short = 'n', requires = "rewrite")]
+    #[arg(
+        long,
+        short = 'n',
+        requires = "rewrite",
+        help = "Preview the rewrite as a unified diff without modifying files. Only meaningful \
+                with `--rewrite`. Default (lint) mode is already read-only; `--dry-run` is \
+                meaningful only with `--rewrite` (enforced by clap)"
+    )]
     dry_run: bool,
-    /// Unified-diff context line count (used with `--dry-run`).
-    /// Only meaningful with `--rewrite`.
-    #[arg(long, default_value_t = 3, value_name = "N", requires = "rewrite")]
+    #[arg(
+        long,
+        default_value_t = 3,
+        value_name = "N",
+        requires = "rewrite",
+        help = "Unified-diff context line count (used with `--dry-run`). Only meaningful with \
+                `--rewrite`"
+    )]
     context: usize,
-    /// Word budget for doc-comment prose. Fenced code blocks (` ``` `
-    /// or `~~~`) are excluded from the count and do not consume the
-    /// budget.
-    #[arg(long, default_value_t = 80, value_name = "N")]
+    #[arg(
+        long,
+        default_value_t = 80,
+        value_name = "N",
+        help = "Word budget for doc-comment prose. Fenced code blocks (` ``` ` or `~~~`) are \
+                excluded from the count and do not consume the budget"
+    )]
     doc_max_words: usize,
-    /// DEPRECATED alias for plain `--rewrite`. Retained for one
-    /// release. Dispatches the same byte-preserving rewrite path
-    /// `--rewrite` runs by default; emits a deprecation note on stderr.
-    #[arg(long, requires = "rewrite")]
+    #[arg(
+        long,
+        requires = "rewrite",
+        help = "DEPRECATED alias for plain `--rewrite`. Retained for one release. Dispatches \
+                the same byte-preserving rewrite path `--rewrite` runs by default; emits a \
+                deprecation note on stderr"
+    )]
     rustdoc_link_idioms: bool,
 }
 enum ArgvRejection {
@@ -266,10 +282,6 @@ fn run_strip(root: &Path, mode: RewriteMode) -> u32 {
     eprintln!("{}", rewrite_summary_record(mode, &counts_total));
     errors
 }
-/// Cap on `DOC_LINT_HINT` records emitted per finding kind. Beyond this,
-/// the residual count is surfaced as a single `DOC_LINT_TRUNCATED` line.
-/// Picked as the upper end of "comfortable to scan in an agent context
-/// window"; the hard contract is the truncation record, not the cap value.
 const DOC_LINT_HINT_CAP: usize = 50;
 
 fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
@@ -344,10 +356,6 @@ fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
     Ok(0)
 }
 
-/// Emit one `doc_lint_header` record per finding kind, up to
-/// [`DOC_LINT_HINT_CAP`] `doc_lint_hint` records sorted by
-/// `words - budget` descending, and a `doc_lint_truncated` record when
-/// the kind has more findings than the cap.
 fn emit_doc_lint_hints(findings: &[(std::path::PathBuf, comment_free::DocFinding)]) {
     if findings.is_empty() {
         return;

@@ -514,6 +514,35 @@ fn strip_with_parse_error_exits_five() {
         "missing PARSE_ERROR diagnostic:\n{stderr}"
     );
 }
+#[test]
+fn strip_with_a_write_conflict_exits_five_and_leaves_the_file_untouched() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a.rs", "// drop me\nfn f() {}\n");
+    let out = Command::new(bin())
+        .arg("--rewrite")
+        .arg(td.path())
+        .env("COMMENT_FREE_SIMULATE_WRITE_CONFLICT", "1")
+        .output()
+        .expect("failed to spawn comment-free");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a write conflict must exit 5:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("CONFLICT_ERROR"),
+        "missing CONFLICT_ERROR diagnostic:\n{stderr}"
+    );
+    assert_eq!(read(td.path(), "a.rs"), "// drop me\nfn f() {}\n");
+    let mut residue: Vec<String> = fs::read_dir(td.path().join("src"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    residue.sort();
+    assert_eq!(residue, vec!["a.rs".to_string()]);
+}
 fn run_lint(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg(root)

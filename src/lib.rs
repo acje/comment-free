@@ -169,7 +169,97 @@ pub enum FileOutcome {
     },
     ParseError(String),
     IoError(String),
+    /// The destination no longer held the bytes originally read, so the
+    /// rewrite was abandoned and the file left exactly as found.
+    Conflict,
 }
+#[derive(Debug, thiserror::Error)]
+enum WriteError {
+    #[error("destination changed since it was read")]
+    Conflict,
+    #[error(
+        "destination is a symbolic link; rewriting it would replace the link rather than its target"
+    )]
+    SymlinkDestination,
+    #[error("io error: {0}")]
+    Io(#[from] io::Error),
+}
+struct TempFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+impl TempFileGuard {
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            drop(fs::remove_file(&self.path));
+        }
+    }
+}
+fn write_atomically(path: &Path, expected: &str, rewritten: &str) -> Result<(), WriteError> {
+    use std::io::Write as _;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(WriteError::SymlinkDestination);
+    }
+    let permissions = fs::metadata(path)?.permissions();
+    let (mut file, mut guard) = create_sibling_temp(path, dir)?;
+    file.write_all(rewritten.as_bytes())?;
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    fs::set_permissions(&guard.path, permissions)?;
+    if !destination_still_holds(path, expected)? {
+        return Err(WriteError::Conflict);
+    }
+    fs::rename(&guard.path, path)?;
+    guard.disarm();
+    Ok(())
+}
+const SIMULATE_WRITE_CONFLICT_ENV: &str = "COMMENT_FREE_SIMULATE_WRITE_CONFLICT";
+fn destination_still_holds(path: &Path, expected: &str) -> Result<bool, WriteError> {
+    if std::env::var_os(SIMULATE_WRITE_CONFLICT_ENV).is_some() {
+        return Ok(false);
+    }
+    Ok(fs::read_to_string(path)? == expected)
+}
+fn create_sibling_temp(path: &Path, dir: &Path) -> Result<(fs::File, TempFileGuard), WriteError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let stem = path.file_name().map_or_else(
+        || String::from("source"),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let pid = std::process::id();
+    for _ in 0..TEMP_NAME_ATTEMPTS {
+        let nonce = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate = dir.join(format!(".{stem}.{pid}.{nonce}.comment-free-tmp"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => {
+                let guard = TempFileGuard {
+                    path: candidate,
+                    armed: true,
+                };
+                return Ok((file, guard));
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(WriteError::Io(e)),
+        }
+    }
+    Err(WriteError::Io(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "exhausted temporary file name attempts",
+    )))
+}
+const TEMP_NAME_ATTEMPTS: u32 = 1024;
 /// Knobs [`process_file`] reads. `main.rs`'s clap `Options` is intentionally a
 /// superset; this trims the surface to what the pure logic actually needs.
 pub struct ProcessOptions {
@@ -191,6 +281,18 @@ pub struct ProcessOptions {
 /// - [`FileOutcome::ParseError`] — syn parse for the doc-link pass
 ///   failed; file left untouched on disk.
 /// - [`FileOutcome::IoError`] — any I/O failure.
+/// - [`FileOutcome::Conflict`] — the file changed on disk between the
+///   read and the write; the destination keeps its own bytes.
+///
+/// In write mode the new content lands via a sibling temporary file
+/// renamed over the destination, so the destination is never truncated
+/// in place and a partial rewrite cannot be observed. A destination
+/// that is itself a symbolic link is refused as
+/// [`FileOutcome::IoError`] rather than rewritten, because the rename
+/// would replace the link instead of its target. The temporary file is
+/// removed on every returning error path and, on a best-effort basis,
+/// while a panic unwinds; an abort or a failing removal can still leave
+/// it behind.
 ///
 /// Stripped: ordinary `//` line and `/* */` block comments. Preserved:
 /// doc comments (`///`, `//!`, `/** */`, `/*! */`), `// SAFETY:` /
@@ -224,9 +326,12 @@ pub fn process_file(path: &Path, opts: &ProcessOptions) -> FileOutcome {
             counts,
         }
     } else {
-        match fs::write(path, rewritten) {
+        match write_atomically(path, &original, &rewritten) {
             Ok(()) => FileOutcome::Rewritten { diff: None, counts },
-            Err(e) => FileOutcome::IoError(e.to_string()),
+            Err(WriteError::Conflict) => FileOutcome::Conflict,
+            Err(e @ (WriteError::SymlinkDestination | WriteError::Io(_))) => {
+                FileOutcome::IoError(e.to_string())
+            }
         }
     }
 }
@@ -1483,6 +1588,134 @@ fn impl_item_label_and_attrs(item: &syn::ImplItem) -> Option<(String, &[Attribut
         _ => return None,
     };
     Some((label, attrs, line))
+}
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::{
+        FileOutcome, ProcessOptions, WriteError, create_sibling_temp, process_file,
+        write_atomically,
+    };
+    use std::fs;
+    fn write_opts() -> ProcessOptions {
+        ProcessOptions {
+            dry_run: false,
+            context: 3,
+        }
+    }
+    fn dir_entry_names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+    #[test]
+    fn destination_changed_since_read_is_a_conflict_and_leaves_bytes_untouched() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        fs::write(&path, "concurrent editor won\n").unwrap();
+        let err = write_atomically(&path, "bytes we read earlier\n", "our rewrite\n").unwrap_err();
+        assert!(matches!(err, WriteError::Conflict), "got {err:?}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "concurrent editor won\n"
+        );
+        assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
+    }
+    #[test]
+    fn a_conflicted_destination_is_still_rewritable_afterwards() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
+        assert!(matches!(
+            write_atomically(&path, "stale bytes\n", "never lands\n"),
+            Err(WriteError::Conflict)
+        ));
+        match process_file(&path, &write_opts()) {
+            FileOutcome::Rewritten { .. } => {}
+            other => panic!("expected Rewritten after a conflict, got {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "fn f() {}\n");
+        assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
+    }
+    #[test]
+    fn successful_write_leaves_no_temp_files_behind() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
+        match process_file(&path, &write_opts()) {
+            FileOutcome::Rewritten { .. } => {}
+            other => panic!("expected Rewritten, got {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "fn f() {}\n");
+        assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn rewrite_preserves_the_destination_file_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        match process_file(&path, &write_opts()) {
+            FileOutcome::Rewritten { .. } => {}
+            other => panic!("expected Rewritten, got {other:?}"),
+        }
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640, "mode was {mode:o}");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_destination_is_refused_and_its_target_is_left_alone() {
+        let td = tempfile::tempdir().unwrap();
+        let target = td.path().join("real.rs");
+        let link = td.path().join("link.rs");
+        fs::write(&target, "// drop me\nfn f() {}\n").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        match process_file(&link, &write_opts()) {
+            FileOutcome::IoError(msg) => assert!(msg.contains("symbolic link"), "got {msg}"),
+            other => panic!("expected IoError, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "// drop me\nfn f() {}\n"
+        );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            dir_entry_names(td.path()),
+            vec!["link.rs".to_string(), "real.rs".to_string()]
+        );
+    }
+    #[test]
+    fn a_panic_after_temp_creation_unwinds_through_the_guard_and_removes_the_temp() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        fs::write(&path, "fn f() {}\n").unwrap();
+        let dir = td.path().to_path_buf();
+        let panicked = std::panic::catch_unwind(|| {
+            let (_file, _guard) = create_sibling_temp(&path, &dir).unwrap();
+            assert_eq!(dir_entry_names(&dir).len(), 2, "temp should exist here");
+            panic!("simulated failure after the temp file exists");
+        });
+        assert!(panicked.is_err(), "expected the closure to unwind");
+        assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
+    }
+    #[test]
+    fn an_io_failure_after_temp_creation_leaves_no_residue() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        fs::create_dir(&path).unwrap();
+        let err = write_atomically(&path, "bytes we read earlier\n", "our rewrite\n").unwrap_err();
+        assert!(matches!(err, WriteError::Io(_)), "got {err:?}");
+        assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
+    }
 }
 #[cfg(test)]
 mod process_file_tests {

@@ -63,10 +63,49 @@ Exit codes:
 - `1`: catastrophic / unmapped IO error
 - `2`: invalid CLI arguments
 - `4`: doc-lint findings in default mode
-- `5`: per-file parse or I/O errors during processing
+- `5`: per-file parse or I/O errors during processing, or a write conflict
 
 `--rustdoc-link-idioms` is a deprecated alias for `--rewrite` and is retained
 for one release.
+
+## How `--rewrite` writes, and what it does not promise
+
+A rewrite never truncates a source file in place. The new content is
+written to a sibling temporary file in the same directory, given the
+destination's permissions, flushed and `sync_all`'d, and only then
+renamed over the destination. Immediately before the rename the tool
+re-reads the destination and aborts if it no longer holds the bytes that
+were originally read; the abort is reported as `CONFLICT_ERROR` on
+stderr and exits `5`, leaving the destination byte-identical.
+
+Deliberate limits of that scheme:
+
+- **Supported platforms.** Unix only. CI exercises `ubuntu-latest` and
+  `macos-latest`. The atomic-replacement and permission-preservation
+  behaviour described here is not claimed for Windows, whose
+  `rename`-over-an-existing-file semantics differ and are untested.
+- **Symbolic links.** A destination that is itself a symlink is refused
+  with an I/O error rather than rewritten: renaming over it would
+  replace the link with a regular file and leave the real target
+  unchanged. Directory traversal does not follow links, so this only
+  affects direct library calls.
+- **Hard links.** Rename replaces one pathname's inode. A rewritten file
+  with other hard-link aliases becomes a new inode for the walked path
+  while the other aliases keep the old contents. Files that must be
+  observed through all their aliases should not be rewritten by this
+  tool.
+- **Concurrent writers.** The re-read/rename pair is a check followed by
+  an action, not an atomic compare-and-swap. It narrows, but cannot
+  close, the window in which another writer's change is lost. There is
+  no locking.
+- **Crash durability.** The replacement bytes are synced before the
+  rename, so no partial file can be observed. The parent directory is
+  not synced, so the rename itself is not guaranteed to survive a power
+  loss.
+- **Temporary-file cleanup.** The temporary file is removed on every
+  returning error path, and on a best-effort basis while a panic
+  unwinds. An abort, a signal, or a failing removal can still leave a
+  `.<name>.<pid>.<n>.comment-free-tmp` file behind.
 
 ## Development
 

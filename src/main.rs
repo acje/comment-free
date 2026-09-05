@@ -248,6 +248,13 @@ fn run_strip(opts: &Options) -> u32 {
                 errors += 1;
                 eprintln!("IO_ERROR\t{}\t{}", path.display(), msg);
             }
+            FileOutcome::Conflict => {
+                errors += 1;
+                eprintln!(
+                    "CONFLICT_ERROR\t{}\tdestination changed since it was read",
+                    path.display()
+                );
+            }
         }
     }
     let mode = if opts.dry_run { "dry-run" } else { "write" };

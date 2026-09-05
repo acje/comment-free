@@ -651,15 +651,10 @@ pub fn lint_summary_record(files: u32, findings: u32, errors: u32) -> String {
     out.push('}');
     out
 }
-/// Process `path`: doc-comment link-idiom canonicalisation + lexer-based
-/// non-doc comment strip. Every ordinary `//` and `/* */` comment goes;
-/// doc comments and every other byte are preserved.
+/// Canonicalise rustdoc link idioms in `path`, then strip every
+/// non-doc `//` and `/* */` comment. Every other byte is preserved.
 ///
-/// [`RewriteMode::Write`] yields [`FileOutcome::Rewritten`],
-/// [`RewriteMode::DryRun`] yields [`FileOutcome::WouldRewrite`] and
-/// touches nothing, and an unchanged file yields
-/// [`FileOutcome::Unchanged`] in either. [`FileOutcome::Failed`] leaves
-/// the file exactly as found; see [`FileError`].
+/// The mode selects the [`FileOutcome`] variant; see its variant docs.
 ///
 /// A write lands via a sibling temporary file renamed over the
 /// destination, so a partial rewrite is never observable. The temporary
@@ -708,22 +703,16 @@ pub fn strip_line_comments(src: &str) -> String {
     strip_line_comments_with_counts(src).0
 }
 /// Like [`strip_line_comments`] but also returns a [`RewriteCounts`]
-/// tally of the strip pass.
+/// tally. `doc_links_rewritten` stays 0; [`process_file`] fills it.
 ///
 /// Drops a token iff it is a `LineComment` or `BlockComment` with
-/// `doc_style: None`; doc comments and every other token are preserved
-/// unchanged. String-literal interiors are structurally unreachable by
-/// this pass, so comment-looking text inside a string round-trips
-/// byte-identical.
+/// `doc_style: None`. Comment-looking text inside a string literal is
+/// structurally unreachable here and round-trips byte-identical.
 ///
 /// A solo-line drop collapses its trailing blank-line scar; an inline
 /// (post-code) drop trims the preceding horizontal whitespace instead.
 /// A contiguous run of solo-line drops with blanks on both sides emits
 /// `max(blanks_above, blanks_below)` rather than their sum.
-///
-/// See [`RewriteCounts`] for field meanings; `doc_links_rewritten`
-/// stays 0 here — that count comes from [`process_file`]'s upstream
-/// doc-link pass.
 #[must_use]
 pub fn strip_line_comments_with_counts(src: &str) -> (String, RewriteCounts) {
     let mut out = String::with_capacity(src.len());

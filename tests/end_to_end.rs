@@ -1634,6 +1634,40 @@ fn root_without_crates_or_src_processes_nothing() {
     );
 }
 #[test]
+fn every_cargo_standard_source_location_is_processed() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    for dir in ["benches", "examples", "src", "tests"] {
+        fs::create_dir_all(root.join(dir)).expect("mkdir source dir");
+        fs::write(root.join(dir).join("unit.rs"), "// removable\nfn u() {}\n")
+            .expect("write source");
+    }
+    fs::write(root.join("build.rs"), "// removable\nfn main() {}\n").expect("write build script");
+    let out = run_dry(root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let rewritten = rewritten_paths(&stdout);
+    for expected in [
+        "benches/unit.rs",
+        "examples/unit.rs",
+        "src/unit.rs",
+        "tests/unit.rs",
+        "build.rs",
+    ] {
+        assert!(
+            rewritten.iter().any(|p| p.ends_with(expected)),
+            "cargo compiles {expected} as crate source, so a self-check that skips it is \
+             narrower than the claim made for it:\n{stdout}"
+        );
+    }
+    let summary = one_record(&stderr, "strip_summary");
+    assert_eq!(
+        summary.number("rewritten"),
+        5,
+        "every standard source location must be reported:\n{stderr}"
+    );
+}
+#[test]
 fn rewrite_preserves_code_spacing_when_only_comments_strip() {
     let td = tempfile::tempdir().unwrap();
     let original = "// strip me\n\

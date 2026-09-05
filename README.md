@@ -10,7 +10,9 @@ links, and linted when they grow too long. Repository documentation files are
 reported but never rewritten. Output stays terse, structured, and informative
 for automated agents.
 
-Default mode is read-only: it walks Rust source files under `crates/` and `src/`
+Default mode is read-only: it walks Rust source files under the locations
+cargo compiles as crate source — `benches/`, `crates/`, `examples/`, `src/`,
+`tests/`, and a root `build.rs` —
 and reports doc comments whose prose exceeds the configured word budget. Fenced
 code blocks are excluded from the count. Findings, run diagnostics, errors and
 summaries are all emitted as JSON Lines so agents and scripts can parse them

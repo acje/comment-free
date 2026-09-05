@@ -1800,6 +1800,112 @@ fn ancestor_named_src_does_not_widen_the_supplied_root() {
         "an ancestor named src must not widen traversal to the whole supplied root:\n{stdout}"
     );
 }
+fn manifest_policy_fixture(td: &Path) -> std::path::PathBuf {
+    let repo = td.join("repo");
+    fs::create_dir_all(repo.join("src/module")).expect("mkdir repo/src/module");
+    fs::write(repo.join("src/module/mod.rs"), "// removable\nfn m() {}\n").expect("write mod");
+    repo
+}
+#[test]
+fn absent_manifest_leaves_a_supplied_subtree_unanchored_and_clean() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = manifest_policy_fixture(td.path());
+    let out = run_dry(&repo.join("src/module"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an absent manifest is a decided non-anchor, not an indeterminate:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout).is_empty(),
+        "an unanchored subtree must not be walked directly:\n{stdout}"
+    );
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("errors"),
+        0,
+        "an absent manifest must not be reported as a walk error:\n{stderr}"
+    );
+}
+#[test]
+fn manifest_that_is_a_directory_is_an_error_not_a_clean_run() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = manifest_policy_fixture(td.path());
+    fs::create_dir(repo.join("Cargo.toml")).expect("mkdir Cargo.toml");
+    let out = run_dry(&repo.join("src/module"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a manifest node that is not a regular file leaves anchoring undecidable:\n{stderr}"
+    );
+    assert!(
+        one_error(&stderr, "walk")
+            .text("path")
+            .contains("Cargo.toml"),
+        "expected a walk run_error naming the undecidable manifest:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout).is_empty(),
+        "an undecidable manifest must not silently anchor the subtree:\n{stdout}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn manifest_symlink_to_an_inaccessible_target_is_an_error_not_a_clean_run() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = manifest_policy_fixture(td.path());
+    let vault = repo.join("vault");
+    fs::create_dir(&vault).expect("mkdir vault");
+    fs::write(vault.join("Cargo.toml"), "[package]\nname = \"p\"\n").expect("write manifest");
+    std::os::unix::fs::symlink(vault.join("Cargo.toml"), repo.join("Cargo.toml"))
+        .expect("symlink manifest");
+    make_unreadable(&vault);
+    let out = run_dry(&repo.join("src/module"));
+    make_readable(&vault);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "an unresolvable manifest symlink is indeterminate, never a clean run:\n{stderr}"
+    );
+    assert!(
+        one_error(&stderr, "walk")
+            .text("path")
+            .contains("Cargo.toml"),
+        "expected a walk run_error naming the unresolvable manifest:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout).is_empty(),
+        "an unresolvable manifest must not silently anchor the subtree:\n{stdout}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn manifest_symlink_to_a_readable_file_anchors_the_supplied_subtree() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = manifest_policy_fixture(td.path());
+    fs::write(repo.join("real-manifest.toml"), "[package]\nname = \"p\"\n").expect("write real");
+    std::os::unix::fs::symlink(repo.join("real-manifest.toml"), repo.join("Cargo.toml"))
+        .expect("symlink manifest");
+    let out = run_dry(&repo.join("src/module"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a manifest symlink resolving to a regular file is a decided anchor:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout)
+            .iter()
+            .any(|p| p.ends_with("module/mod.rs")),
+        "a symlinked manifest must anchor the supplied subtree:\n{stdout}"
+    );
+}
 fn run_idioms(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")

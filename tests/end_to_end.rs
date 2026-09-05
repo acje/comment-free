@@ -1906,6 +1906,132 @@ fn manifest_symlink_to_a_readable_file_anchors_the_supplied_subtree() {
         "a symlinked manifest must anchor the supplied subtree:\n{stdout}"
     );
 }
+#[cfg(unix)]
+#[test]
+fn an_unresolvable_allowlisted_child_is_an_error_not_a_clean_run() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path();
+    std::os::unix::fs::symlink("src", repo.join("src")).expect("self-referential src link");
+    let out = run_dry(repo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "an allowlisted child that cannot be stat-ed is undecidable, never a clean run:\n{stderr}"
+    );
+    assert!(
+        one_error(&stderr, "walk").text("path").ends_with("src"),
+        "expected a walk run_error naming the unresolvable child:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout).is_empty(),
+        "an unresolvable child must not silently vanish from the walk roots:\n{stdout}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn an_allowlisted_child_symlinked_to_a_real_directory_is_walked() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path();
+    let real = repo.join("realsrc/inner");
+    fs::create_dir_all(&real).expect("mkdir realsrc/inner");
+    fs::write(real.join("m.rs"), "// removable\nfn m() {}\n").expect("write fixture");
+    std::os::unix::fs::symlink("realsrc", repo.join("src")).expect("src link");
+    let out = run_dry(repo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an allowlisted child resolving to a real directory is a decided walk root:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout)
+            .iter()
+            .any(|p| p.ends_with("inner/m.rs")),
+        "a symlinked source root must still be walked:\n{stdout}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn a_symlinked_source_file_is_refused_not_silently_skipped() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path();
+    let store = repo.join("store");
+    fs::create_dir_all(&store).expect("mkdir store");
+    fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    fs::write(store.join("real.rs"), "// removable\nfn a() {}\n").expect("write target");
+    std::os::unix::fs::symlink(store.join("real.rs"), repo.join("src/linked.rs"))
+        .expect("symlink source file");
+    let out = run(repo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a source file the rewrite path refuses is not a clean run:\n{stderr}"
+    );
+    assert!(
+        one_error(&stderr, "walk")
+            .text("path")
+            .ends_with("linked.rs"),
+        "expected a walk run_error naming the symlinked source file:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout).is_empty(),
+        "nothing was rewritten, so nothing may be reported rewritten:\n{stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(store.join("real.rs")).expect("read target"),
+        "// removable\nfn a() {}\n",
+        "the link target must be left byte-identical"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn a_symlinked_directory_under_a_source_root_is_refused_not_silently_skipped() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path();
+    let real = repo.join("elsewhere/deep");
+    fs::create_dir_all(&real).expect("mkdir elsewhere/deep");
+    fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    fs::write(real.join("f.rs"), "// removable\nfn f() {}\n").expect("write hidden file");
+    std::os::unix::fs::symlink(&real, repo.join("src/linkdir")).expect("symlink dir");
+    let out = run_dry(repo);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a subtree the walk cannot enter is not a clean run:\n{stderr}"
+    );
+    assert!(
+        one_error(&stderr, "walk").text("path").ends_with("linkdir"),
+        "expected a walk run_error naming the undescended directory link:\n{stderr}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn a_symlinked_build_directory_is_pruned_not_reported() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path();
+    let real = repo.join("elsewhere");
+    fs::create_dir_all(&real).expect("mkdir elsewhere");
+    write(repo, "a.rs", "// removable\nfn a() {}\n");
+    std::os::unix::fs::symlink(&real, repo.join("src/target")).expect("symlink target");
+    let out = run_dry(repo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a link named as build output is pruned by name, not reported:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout).iter().any(|p| p.ends_with("a.rs")),
+        "pruning the link must not stop the rest of the walk:\n{stdout}"
+    );
+}
 fn run_idioms(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")

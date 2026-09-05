@@ -1404,15 +1404,65 @@ fn classify_root(root: &Path) -> Result<RootScope, WalkError> {
     }
     Ok(RootScope::ProjectRoot)
 }
+#[derive(Debug, Clone, Copy)]
+enum ChildRoot {
+    Present,
+    Absent,
+}
+fn child_source_root(child: &Path) -> Result<ChildRoot, WalkError> {
+    match std::fs::symlink_metadata(child) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChildRoot::Absent),
+        Err(e) => Err(WalkError::at(child, &e.to_string())),
+        Ok(node) if node.is_dir() => Ok(ChildRoot::Present),
+        Ok(node) if node.is_symlink() => resolve_child_root_link(child),
+        Ok(_) => Ok(ChildRoot::Absent),
+    }
+}
+fn resolve_child_root_link(child: &Path) -> Result<ChildRoot, WalkError> {
+    match std::fs::metadata(child) {
+        Ok(target) if target.is_dir() => Ok(ChildRoot::Present),
+        Ok(_) => Ok(ChildRoot::Absent),
+        Err(e) => Err(WalkError::at(child, &e.to_string())),
+    }
+}
 fn resolve_walk_roots(root: &Path) -> Result<Vec<PathBuf>, WalkError> {
     Ok(match classify_root(root)? {
         RootScope::SourceTree => vec![root.to_path_buf()],
-        RootScope::ProjectRoot => ALLOWED_ROOT_DIRS
-            .iter()
-            .map(|d| root.join(d))
-            .filter(|p| p.is_dir())
-            .collect(),
+        RootScope::ProjectRoot => {
+            let mut bases = Vec::new();
+            for child in ALLOWED_ROOT_DIRS.iter().map(|d| root.join(d)) {
+                match child_source_root(&child)? {
+                    ChildRoot::Present => bases.push(child),
+                    ChildRoot::Absent => {}
+                }
+            }
+            bases
+        }
     })
+}
+const SYMLINK_NOT_TRAVERSED: &str =
+    "symbolic link is not followed, so what it points at cannot be reported clean";
+fn is_rust_source(path: &Path) -> bool {
+    path.extension().and_then(|s| s.to_str()) == Some("rs")
+}
+#[derive(Debug, Clone, Copy)]
+enum LinkedEntry {
+    HidesSource,
+    Ignorable,
+}
+fn linked_entry(path: &Path) -> Result<LinkedEntry, WalkError> {
+    match std::fs::metadata(path) {
+        Err(e) => Err(WalkError::at(path, &e.to_string())),
+        Ok(target) if target.is_dir() || is_rust_source(path) => Ok(LinkedEntry::HidesSource),
+        Ok(_) => Ok(LinkedEntry::Ignorable),
+    }
+}
+fn walked_link(path: &Path) -> Option<Result<PathBuf, WalkError>> {
+    match linked_entry(path) {
+        Ok(LinkedEntry::HidesSource) => Some(Err(WalkError::at(path, SYMLINK_NOT_TRAVERSED))),
+        Ok(LinkedEntry::Ignorable) => None,
+        Err(e) => Some(Err(e)),
+    }
 }
 /// Iterate every `.rs` file under `root`, yielding traversal failures
 /// rather than discarding them.
@@ -1421,9 +1471,9 @@ fn resolve_walk_roots(root: &Path) -> Result<Vec<PathBuf>, WalkError> {
 /// (`crates/`, `src/`). `root` is walked directly when so named, or
 /// when under one anchored by a sibling `Cargo.toml`; otherwise its
 /// allowlisted children are used. An ancestor merely *spelled* `src`
-/// never widens traversal. A manifest present but unresolvable to a
-/// regular file leaves anchoring undecided and surfaces as a
-/// [`WalkError`], never as scope. Build output is pruned.
+/// never widens traversal. Anything unresolvable, and any unfollowed
+/// link that could hide source, surfaces as a [`WalkError`], never as
+/// scope. Build output is pruned.
 pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
     let (bases, undecided) = match resolve_walk_roots(root) {
         Ok(bases) => (bases, None),
@@ -1441,7 +1491,7 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
                         return true;
                     }
                     let name = e.file_name().to_string_lossy();
-                    if e.file_type().is_dir()
+                    if !e.file_type().is_file()
                         && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()))
                     {
                         return false;
@@ -1452,9 +1502,9 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
                     Err(e) => Some(Err(WalkError::rooted_at(&base, &e))),
                     Ok(e) if e.file_type().is_file() => {
                         let path = e.into_path();
-                        (path.extension().and_then(|s| s.to_str()) == Some("rs"))
-                            .then_some(Ok(path))
+                        is_rust_source(&path).then_some(Ok(path))
                     }
+                    Ok(e) if e.depth() > 0 && e.file_type().is_symlink() => walked_link(e.path()),
                     Ok(_) => None,
                 })
         }))
@@ -4276,6 +4326,107 @@ mod walk_root_tests {
             super::manifest_anchor(td.path()).is_err(),
             "a deliberate link to a missing target is not the absence of a manifest"
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_allowlisted_child_is_not_a_decided_absence() {
+        let td = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("src", td.path().join("src")).unwrap();
+        let e = resolve_walk_roots(td.path())
+            .expect_err("a child that cannot be stat-ed must not be dropped as absent");
+        assert!(
+            e.path().ends_with("src"),
+            "the error must name the undecidable child, got {e:?}"
+        );
+    }
+    #[test]
+    fn an_absent_allowlisted_child_is_a_decided_absence() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir(td.path().join("src")).unwrap();
+        assert_eq!(
+            roots(td.path()),
+            vec![td.path().join("src")],
+            "an absent crates/ is a decided absence, not an error"
+        );
+    }
+}
+#[cfg(test)]
+mod walk_symlink_tests {
+    use super::walk_rs_files;
+    use std::path::{Path, PathBuf};
+    fn walk(root: &Path) -> (Vec<PathBuf>, Vec<String>) {
+        let mut files = Vec::new();
+        let mut errors = Vec::new();
+        for entry in walk_rs_files(root) {
+            match entry {
+                Ok(p) => files.push(p),
+                Err(e) => errors.push(e.path().display().to_string()),
+            }
+        }
+        (files, errors)
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_rust_file_is_surfaced_not_skipped() {
+        let td = tempfile::tempdir().unwrap();
+        let src = td.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(td.path().join("real.rs"), "fn a() {}\n").unwrap();
+        std::os::unix::fs::symlink(td.path().join("real.rs"), src.join("linked.rs")).unwrap();
+        let (files, errors) = walk(td.path());
+        assert!(
+            files.is_empty(),
+            "a symlinked source file must not be handed to the rewrite path: {files:?}"
+        );
+        assert!(
+            errors.iter().any(|p| p.ends_with("linked.rs")),
+            "a symlinked source file must surface as a traversal failure, got {errors:?}"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_directory_under_a_walk_root_is_surfaced_not_skipped() {
+        let td = tempfile::tempdir().unwrap();
+        let src = td.path().join("src");
+        let real = td.path().join("elsewhere");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("f.rs"), "fn f() {}\n").unwrap();
+        std::os::unix::fs::symlink(&real, src.join("linkdir")).unwrap();
+        let (_, errors) = walk(td.path());
+        assert!(
+            errors.iter().any(|p| p.ends_with("linkdir")),
+            "an undescended symlinked directory hides every file beneath it, got {errors:?}"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_build_directory_is_pruned_not_reported() {
+        let td = tempfile::tempdir().unwrap();
+        let src = td.path().join("src");
+        let real = td.path().join("elsewhere");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, src.join("target")).unwrap();
+        std::os::unix::fs::symlink(&real, src.join(".hidden")).unwrap();
+        let (_, errors) = walk(td.path());
+        assert!(
+            errors.is_empty(),
+            "a link named as build output or a dotdir is pruned by name, got {errors:?}"
+        );
+    }
+    #[test]
+    fn a_regular_rust_file_is_still_yielded() {
+        let td = tempfile::tempdir().unwrap();
+        let src = td.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.rs"), "fn a() {}\n").unwrap();
+        let (files, errors) = walk(td.path());
+        assert!(
+            errors.is_empty(),
+            "no traversal failure expected: {errors:?}"
+        );
+        assert_eq!(files.len(), 1, "the regular source file must be walked");
     }
 }
 #[cfg(test)]

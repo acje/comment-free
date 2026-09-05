@@ -68,6 +68,10 @@ use std::process::ExitCode;
                        one of them was decided against the budget\n\
                     1  catastrophic / unmapped IO error\n\
                     2  invalid CLI arguments (clap rejection)\n\
+                    3  `--rewrite --dry-run` previewed at least one pending\n\
+                       change, so the tree is not already comment-free. Write\n\
+                       mode is not a check and exits 0 whatever it rewrote;\n\
+                       exit 5 outranks exit 3\n\
                     4  the tree did not come back clean in default mode: at\n\
                        least one doc-lint finding, or at least one undecided\n\
                        item. An undecided item is NOT a finding — read\n\

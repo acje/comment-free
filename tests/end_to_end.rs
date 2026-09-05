@@ -1704,7 +1704,15 @@ fn root_inside_crates_subtree_is_processed_directly() {
     let root = td.path();
     let scoped = root.join("crates/foo");
     fs::create_dir_all(scoped.join("src")).expect("mkdir crates/foo/src");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .expect("write workspace manifest");
+    fs::write(scoped.join("Cargo.toml"), "[package]\nname = \"foo\"\n")
+        .expect("write crate manifest");
     fs::write(scoped.join("src/lib.rs"), "// removable\nfn c() {}\n").expect("write");
+    fs::write(scoped.join("build.rs"), "// removable\nfn main() {}\n").expect("write build");
     let out = Command::new(bin())
         .arg("--rewrite")
         .arg("--dry-run")
@@ -1713,11 +1721,58 @@ fn root_inside_crates_subtree_is_processed_directly() {
         .expect("failed to spawn comment-free");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "exit {:?}", out.status.code());
+    let paths = rewritten_paths(&stdout);
     assert!(
-        rewritten_paths(&stdout)
-            .iter()
-            .any(|p| p.ends_with("src/lib.rs")),
+        paths.iter().any(|p| p.ends_with("src/lib.rs")),
         "expected a src/lib.rs rewrite_file record when ROOT is inside crates/:\n{stdout}"
+    );
+    assert!(
+        paths.iter().any(|p| p.ends_with("build.rs")),
+        "a supplied crate root must be walked directly, including root-level build.rs:\n{stdout}"
+    );
+}
+#[test]
+fn supplied_subtree_below_src_is_processed_while_ambient_ancestry_is_not() {
+    let td = tempfile::tempdir().unwrap();
+    let checkout = td.path().join("src/checkout");
+    let repo = checkout.join("repo");
+    fs::create_dir_all(repo.join("src/module")).expect("mkdir repo/src/module");
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"p\"\n").expect("write manifest");
+    fs::write(repo.join("src/module/mod.rs"), "// removable\nfn m() {}\n").expect("write mod");
+    fs::write(checkout.join("stray.rs"), "// removable\nfn s() {}\n").expect("write stray");
+
+    let supplied = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(repo.join("src/module"))
+        .output()
+        .expect("failed to spawn comment-free");
+    let supplied_out = String::from_utf8_lossy(&supplied.stdout);
+    assert!(
+        supplied.status.success(),
+        "exit {:?}",
+        supplied.status.code()
+    );
+    assert!(
+        rewritten_paths(&supplied_out)
+            .iter()
+            .any(|p| p.ends_with("module/mod.rs")),
+        "an intentionally supplied subtree under a manifest-anchored src must be walked directly:\n{supplied_out}"
+    );
+
+    let ambient = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(&checkout)
+        .output()
+        .expect("failed to spawn comment-free");
+    let ambient_out = String::from_utf8_lossy(&ambient.stdout);
+    assert!(ambient.status.success(), "exit {:?}", ambient.status.code());
+    assert!(
+        !rewritten_paths(&ambient_out)
+            .iter()
+            .any(|p| p.ends_with("stray.rs")),
+        "an ancestor merely spelled src, anchored by no manifest, must not widen traversal:\n{ambient_out}"
     );
 }
 #[test]

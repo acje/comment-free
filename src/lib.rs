@@ -1345,27 +1345,50 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
 }
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
 const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
-fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
-    let named_source_root = root
-        .file_name()
+const CARGO_MANIFEST: &str = "Cargo.toml";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootScope {
+    SourceTree,
+    ProjectRoot,
+}
+fn is_named_source_dir(path: &Path) -> bool {
+    path.file_name()
         .and_then(|n| n.to_str())
-        .is_some_and(|n| ALLOWED_ROOT_DIRS.contains(&n));
-    if named_source_root {
-        return vec![root.to_path_buf()];
+        .is_some_and(|n| ALLOWED_ROOT_DIRS.contains(&n))
+}
+fn is_manifest_anchored_source_dir(path: &Path) -> bool {
+    is_named_source_dir(path)
+        && path
+            .parent()
+            .is_some_and(|p| p.join(CARGO_MANIFEST).is_file())
+}
+fn classify_root(root: &Path) -> RootScope {
+    if is_named_source_dir(root) || root.ancestors().any(is_manifest_anchored_source_dir) {
+        RootScope::SourceTree
+    } else {
+        RootScope::ProjectRoot
     }
-    ALLOWED_ROOT_DIRS
-        .iter()
-        .map(|d| root.join(d))
-        .filter(|p| p.is_dir())
-        .collect()
+}
+fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
+    match classify_root(root) {
+        RootScope::SourceTree => vec![root.to_path_buf()],
+        RootScope::ProjectRoot => ALLOWED_ROOT_DIRS
+            .iter()
+            .map(|d| root.join(d))
+            .filter(|p| p.is_dir())
+            .collect(),
+    }
 }
 /// Iterate every `.rs` file under `root`, yielding traversal failures
 /// rather than discarding them.
 ///
 /// Restricts traversal to `.rs` under allowlisted Rust source roots
-/// (`crates/`, `src/`) — `comment-free` is a Rust-only tool. Within those
-/// roots, build-output directories (notably nested `target/`) are still pruned.
-/// An unreadable entry surfaces as [`WalkError`], never as "no entry".
+/// (`crates/`, `src/`). The root is walked directly when it is itself
+/// named as a source root, or lies under one anchored by a sibling
+/// `Cargo.toml`; otherwise its allowlisted children are discovered. An
+/// ancestor merely *spelled* `src`, anchored by no manifest, never
+/// widens traversal. Nested build output is pruned. An unreadable entry
+/// surfaces as [`WalkError`].
 pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
     resolve_walk_roots(root).into_iter().flat_map(|base| {
         WalkDir::new(&base)
@@ -4129,6 +4152,36 @@ mod walk_root_tests {
         assert!(
             resolve_walk_roots(Path::new("/comment-free-no-such-root/crates/checkout")).is_empty(),
             "an ancestor named crates must not make the supplied root a source root"
+        );
+    }
+    #[test]
+    fn manifest_anchored_ancestor_makes_the_supplied_subtree_a_source_root() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = td.path();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        let module = repo.join("src/module");
+        std::fs::create_dir_all(&module).unwrap();
+        assert_eq!(
+            resolve_walk_roots(&module),
+            vec![module.clone()],
+            "a subtree under a manifest-anchored src must be walked directly"
+        );
+        assert_eq!(super::classify_root(&module), super::RootScope::SourceTree);
+    }
+    #[test]
+    fn unanchored_ancestor_leaves_the_supplied_root_a_project_root() {
+        let td = tempfile::tempdir().unwrap();
+        let checkout = td.path().join("src/checkout");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        assert_eq!(
+            super::classify_root(&checkout),
+            super::RootScope::ProjectRoot,
+            "an ancestor named src with no sibling Cargo.toml is ambient spelling, not intent"
+        );
+        assert_eq!(
+            resolve_walk_roots(&checkout),
+            vec![checkout.join("src")],
+            "an unanchored root must fall back to its own allowlisted children"
         );
     }
 }

@@ -9,6 +9,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use syn::ext::IdentExt as _;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, File, Meta, Token};
@@ -1050,6 +1051,12 @@ fn collect_attr_run_splices(attrs: &[Attribute], original: &str, out: &mut Vec<D
 enum DocShape {
     SafeLineOrAttr,
 }
+fn ident_is(id: &syn::Ident, name: &str) -> bool {
+    id.unraw() == name
+}
+fn path_is(path: &syn::Path, name: &str) -> bool {
+    path.get_ident().is_some_and(|id| ident_is(id, name))
+}
 fn doc_attr_literal_span(
     attr: &Attribute,
     original: &str,
@@ -1058,7 +1065,7 @@ fn doc_attr_literal_span(
     let Meta::NameValue(nv) = &attr.meta else {
         return None;
     };
-    if !nv.path.is_ident("doc") {
+    if !path_is(&nv.path, "doc") {
         return None;
     }
     let syn::Expr::Lit(syn::ExprLit {
@@ -1178,10 +1185,10 @@ fn collect_cfg_attr_list_doc_splices(
             continue;
         };
         match &**meta {
-            Meta::List(inner) if inner.path.is_ident("cfg_attr") => {
+            Meta::List(inner) if path_is(&inner.path, "cfg_attr") => {
                 collect_cfg_attr_list_doc_splices(inner, original, out);
             }
-            Meta::NameValue(nv) if nv.path.is_ident("doc") => {
+            Meta::NameValue(nv) if path_is(&nv.path, "doc") => {
                 push_doc_literal_splice(nv, original, out);
             }
             _ => {}
@@ -1269,7 +1276,7 @@ fn unified_diff(path: &Path, original: &str, rewritten: &str, context: usize) ->
 #[must_use]
 fn is_cfg_attr(attr: &Attribute) -> bool {
     match &attr.meta {
-        Meta::List(list) => list.path.is_ident("cfg_attr"),
+        Meta::List(list) => path_is(&list.path, "cfg_attr"),
         _ => false,
     }
 }
@@ -1762,7 +1769,7 @@ fn doc_payload(attr: &Attribute) -> Option<DocPayload> {
     let Meta::NameValue(nv) = &attr.meta else {
         return None;
     };
-    if !nv.path.is_ident("doc") {
+    if !path_is(&nv.path, "doc") {
         return None;
     }
     Some(doc_value_payload(&nv.value))
@@ -1843,17 +1850,17 @@ fn fold_cfg_predicate(predicate: &CfgPredicate) -> CfgTruth {
     let Ok(inner) = cfg_predicate_args(list) else {
         return CfgTruth::Unresolved;
     };
-    if list.path.is_ident("all") {
+    if path_is(&list.path, "all") {
         return inner
             .iter()
             .fold(CfgTruth::Always, |acc, m| acc.and(fold_cfg_predicate(m)));
     }
-    if list.path.is_ident("any") {
+    if path_is(&list.path, "any") {
         return inner
             .iter()
             .fold(CfgTruth::Never, |acc, m| acc.or(fold_cfg_predicate(m)));
     }
-    match (list.path.is_ident("not"), inner.first()) {
+    match (path_is(&list.path, "not"), inner.first()) {
         (true, Some(only)) if inner.len() == 1 => fold_cfg_predicate(only).negate(),
         _ => CfgTruth::Unresolved,
     }
@@ -1865,7 +1872,7 @@ fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
     let Meta::List(list) = &attr.meta else {
         return;
     };
-    if !list.path.is_ident("cfg_attr") {
+    if !path_is(&list.path, "cfg_attr") {
         return;
     }
     collect_cfg_attr_list_doc_parts(list, CfgTruth::Always, out);
@@ -1887,11 +1894,11 @@ fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &
             continue;
         };
         match &*meta {
-            Meta::NameValue(nv) if nv.path.is_ident("doc") => out.push(DocPart {
+            Meta::NameValue(nv) if path_is(&nv.path, "doc") => out.push(DocPart {
                 origin,
                 payload: doc_value_payload(&nv.value),
             }),
-            Meta::List(inner) if inner.path.is_ident("cfg_attr") => {
+            Meta::List(inner) if path_is(&inner.path, "cfg_attr") => {
                 collect_cfg_attr_list_doc_parts(inner, truth, out);
             }
             _ => {}
@@ -2115,7 +2122,7 @@ fn assigns_doc(tokens: proc_macro2::TokenStream) -> bool {
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     trees.iter().enumerate().any(|(i, tree)| match tree {
         proc_macro2::TokenTree::Ident(id) => {
-            id == "doc"
+            ident_is(id, "doc")
                 && matches!(
                     trees.get(i + 1),
                     Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '='
@@ -3057,6 +3064,53 @@ doc = " ```")] #[doc = " w11 w12 w13 w14 w15"] pub fn foo() {}
             r.undecided()[0].outcome(),
             super::DocLintOutcome::UnreadableDocPayload
         );
+    }
+    #[test]
+    fn a_raw_spelled_doc_attribute_is_the_same_path_as_doc() {
+        let f = file(r#"#[r#doc = concat!(" a b c")] pub fn foo() {}"#);
+        let r = report(&f, 1);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
+        assert_eq!(
+            r.undecided()[0].outcome(),
+            super::DocLintOutcome::UnreadableDocPayload
+        );
+    }
+    #[test]
+    fn a_raw_spelled_doc_attribute_in_a_macro_body_is_the_same_path_as_doc() {
+        let f = file(r#"pub fn f() { generate! { #[r#doc = " a b c"] fn g() {} } }"#);
+        let r = report(&f, 1);
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
+        assert_eq!(
+            r.undecided()[0].outcome(),
+            super::DocLintOutcome::UninspectedMacroBody
+        );
+    }
+    #[test]
+    fn a_raw_spelled_cfg_attr_is_the_same_path_as_cfg_attr() {
+        let f = file(r#"#[r#cfg_attr(all(), doc = concat!(" a b c"))] pub fn foo() {}"#);
+        let r = report(&f, 1);
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
+        assert_eq!(
+            r.undecided()[0].outcome(),
+            super::DocLintOutcome::UnreadableDocPayload
+        );
+    }
+    #[test]
+    fn raw_spelled_cfg_predicate_operators_fold_like_their_plain_spellings() {
+        for src in [
+            r#"#[cfg_attr(r#all(), doc = concat!(" a b c"))] pub fn foo() {}"#,
+            r#"#[cfg_attr(r#not(r#any()), doc = concat!(" a b c"))] pub fn foo() {}"#,
+        ] {
+            let f = file(src);
+            let r = report(&f, 1);
+            assert_eq!(r.undecided().len(), 1, "{src}: {:?}", r.undecided());
+            assert_eq!(
+                r.undecided()[0].outcome(),
+                super::DocLintOutcome::UnreadableDocPayload,
+                "{src}"
+            );
+        }
     }
     #[test]
     fn an_unresolved_cfg_attr_carrying_an_unreadable_doc_expression_is_unreadable() {

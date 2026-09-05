@@ -996,6 +996,55 @@ fn a_conditional_fence_around_unconditional_prose_is_undecided_not_clean() {
     assert_eq!(summary.number("findings"), 0);
 }
 #[test]
+fn a_raw_spelled_doc_payload_is_not_reported_clean() {
+    let td = tempfile::tempdir().unwrap();
+    write(
+        td.path(),
+        "a.rs",
+        "#[r#doc = include_str!(\"x.md\")]\npub fn f() {}\n",
+    );
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "r#doc is the same path as doc to rustc, so an unreadable payload spelled \
+         raw must not exit clean\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let undecided = one_record(&stdout, "doc_lint_undecided");
+    assert_eq!(undecided.text("outcome"), "unreadable_doc_payload");
+    assert_eq!(undecided.number("v"), 2, "record version drift");
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("undecided"), 1);
+    assert_eq!(summary.number("findings"), 0);
+    assert_eq!(summary.number("errors"), 0);
+}
+#[test]
+fn a_raw_spelled_doc_inside_a_macro_body_is_not_reported_clean() {
+    let td = tempfile::tempdir().unwrap();
+    write(
+        td.path(),
+        "a.rs",
+        "pub fn f() { generate! { #[r#doc = \" hidden\"] fn g() {} } }\n",
+    );
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a raw-spelled doc attribute inside an opaque macro body must not exit \
+         clean\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let undecided = one_record(&stdout, "doc_lint_undecided");
+    assert_eq!(undecided.text("outcome"), "uninspected_macro_body");
+    assert_eq!(undecided.number("v"), 2, "record version drift");
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("undecided"), 1);
+    assert_eq!(summary.number("errors"), 0);
+}
+#[test]
 fn a_trivially_true_cfg_attr_doc_reaches_exit_four() {
     let td = tempfile::tempdir().unwrap();
     let long = prose_words("w", 90);

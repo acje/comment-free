@@ -20,6 +20,14 @@ fn run_dry(root: &Path) -> std::process::Output {
         .output()
         .expect("failed to spawn comment-free")
 }
+fn assert_pending_changes(out: &std::process::Output, context: &str) {
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{context}: a dry run holding pending changes has not shown the tree clean:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
 fn write(dir: &Path, name: &str, content: &str) {
     let src = dir.join("src");
     fs::create_dir_all(&src).expect("mkdir src");
@@ -1517,12 +1525,7 @@ fn dry_run_processes_crates_and_src_but_skips_target_and_docs() {
     fs::write(root.join("scripts/helper.rs"), "// removable\nfn h() {}\n").expect("write scripts");
     let out = run_dry(root);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "exit {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
-        out.status.code()
-    );
+    assert_pending_changes(&out, "crates and src both hold removable comments");
     let paths = rewritten_paths(&stdout);
     assert!(
         paths.iter().any(|p| p.ends_with("src/lib.rs")),
@@ -1591,7 +1594,7 @@ fn non_rust_files_under_allowed_roots_are_ignored() {
     fs::write(root.join("src/notes.md"), "# notes\n").expect("write md");
     let out = run_dry(root);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "exit {:?}", out.status.code());
+    assert_pending_changes(&out, "src/lib.rs holds a removable comment");
     assert!(
         stdout.contains("src/lib.rs"),
         "expected src/lib.rs in dry-run output:\n{stdout}"
@@ -1631,6 +1634,112 @@ fn root_without_crates_or_src_processes_nothing() {
         ),
         (0, 0, 0),
         "summary should reflect zero work:\n{stderr}"
+    );
+}
+#[test]
+fn every_cargo_standard_source_location_is_processed() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path();
+    for dir in ["benches", "examples", "src", "tests"] {
+        fs::create_dir_all(root.join(dir)).expect("mkdir source dir");
+        fs::write(root.join(dir).join("unit.rs"), "// removable\nfn u() {}\n")
+            .expect("write source");
+    }
+    fs::write(root.join("build.rs"), "// removable\nfn main() {}\n").expect("write build script");
+    let out = run_dry(root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let rewritten = rewritten_paths(&stdout);
+    for expected in [
+        "benches/unit.rs",
+        "examples/unit.rs",
+        "src/unit.rs",
+        "tests/unit.rs",
+        "build.rs",
+    ] {
+        assert!(
+            rewritten.iter().any(|p| p.ends_with(expected)),
+            "cargo compiles {expected} as crate source, so a self-check that skips it is \
+             narrower than the claim made for it:\n{stdout}"
+        );
+    }
+    let summary = one_record(&stderr, "strip_summary");
+    assert_eq!(
+        summary.number("rewritten"),
+        5,
+        "every standard source location must be reported:\n{stderr}"
+    );
+}
+#[test]
+fn a_dry_run_that_would_change_a_file_does_not_report_the_tree_clean() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "d.rs", "// removable\nfn d() {}\n");
+    let out = run_dry(td.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("rewritten"),
+        1,
+        "the fixture must produce a pending change:\n{stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a dry run holding pending changes has not shown the tree clean, so it must not \
+         exit 0:\n{stderr}"
+    );
+}
+#[test]
+fn a_dry_run_over_an_already_clean_tree_exits_zero() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "c.rs", "/// kept\nfn c() {}\n");
+    let out = run_dry(td.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("rewritten"),
+        0,
+        "the fixture must be clean already:\n{stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "nothing pending is a clean tree:\n{stderr}"
+    );
+}
+#[test]
+fn writing_the_rewrite_out_exits_zero_even_though_it_changed_files() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "w.rs", "// removable\nfn w() {}\n");
+    let out = run(td.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("rewritten"),
+        1,
+        "the fixture must be rewritten:\n{stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "write mode was asked to change the tree and did; the tree is clean afterwards:\n{stderr}"
+    );
+}
+#[test]
+fn a_run_error_outranks_a_pending_change_in_the_exit_code() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "d.rs", "// removable\nfn d() {}\n");
+    write(td.path(), "broken.rs", "fn ( {\n");
+    let out = run_dry(td.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let summary = one_record(&stderr, "strip_summary");
+    assert_eq!(
+        (summary.number("rewritten"), summary.number("errors")),
+        (1, 1),
+        "the fixture must hold both a pending change and an error:\n{stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a tree that could not be fully read is a stronger signal than a pending \
+         change:\n{stderr}"
     );
 }
 #[test]
@@ -1720,7 +1829,7 @@ fn root_inside_crates_subtree_is_processed_directly() {
         .output()
         .expect("failed to spawn comment-free");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "exit {:?}", out.status.code());
+    assert_pending_changes(&out, "the supplied subtree holds a removable comment");
     let paths = rewritten_paths(&stdout);
     assert!(
         paths.iter().any(|p| p.ends_with("src/lib.rs")),
@@ -1748,11 +1857,7 @@ fn supplied_subtree_below_src_is_processed_while_ambient_ancestry_is_not() {
         .output()
         .expect("failed to spawn comment-free");
     let supplied_out = String::from_utf8_lossy(&supplied.stdout);
-    assert!(
-        supplied.status.success(),
-        "exit {:?}",
-        supplied.status.code()
-    );
+    assert_pending_changes(&supplied, "the supplied module holds a removable comment");
     assert!(
         rewritten_paths(&supplied_out)
             .iter()
@@ -1789,7 +1894,10 @@ fn ancestor_named_src_does_not_widen_the_supplied_root() {
         .output()
         .expect("failed to spawn comment-free");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "exit {:?}", out.status.code());
+    assert_pending_changes(
+        &out,
+        "the supplied root's own src holds a removable comment",
+    );
     let paths = rewritten_paths(&stdout);
     assert!(
         paths.iter().any(|p| p.ends_with("src/lib.rs")),
@@ -1893,11 +2001,9 @@ fn manifest_symlink_to_a_readable_file_anchors_the_supplied_subtree() {
         .expect("symlink manifest");
     let out = run_dry(&repo.join("src/module"));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "a manifest symlink resolving to a regular file is a decided anchor:\n{stderr}"
+    assert_pending_changes(
+        &out,
+        "a manifest symlink resolving to a regular file is a decided anchor",
     );
     assert!(
         rewritten_paths(&stdout)
@@ -1940,11 +2046,9 @@ fn an_allowlisted_child_symlinked_to_a_real_directory_is_walked() {
     std::os::unix::fs::symlink("realsrc", repo.join("src")).expect("src link");
     let out = run_dry(repo);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "an allowlisted child resolving to a real directory is a decided walk root:\n{stderr}"
+    assert_pending_changes(
+        &out,
+        "an allowlisted child resolving to a real directory is a decided walk root",
     );
     assert!(
         rewritten_paths(&stdout)
@@ -2021,12 +2125,7 @@ fn a_symlinked_build_directory_is_pruned_not_reported() {
     std::os::unix::fs::symlink(&real, repo.join("src/target")).expect("symlink target");
     let out = run_dry(repo);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "a link named as build output is pruned by name, not reported:\n{stderr}"
-    );
+    assert_pending_changes(&out, "a link named as build output is pruned, not reported");
     assert!(
         rewritten_paths(&stdout).iter().any(|p| p.ends_with("a.rs")),
         "pruning the link must not stop the rest of the walk:\n{stdout}"

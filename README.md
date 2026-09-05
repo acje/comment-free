@@ -10,7 +10,9 @@ links, and linted when they grow too long. Repository documentation files are
 reported but never rewritten. Output stays terse, structured, and informative
 for automated agents.
 
-Default mode is read-only: it walks Rust source files under `crates/` and `src/`
+Default mode is read-only: it walks Rust source files under the locations
+cargo compiles as crate source — `benches/`, `crates/`, `examples/`, `src/`,
+`tests/`, and a root `build.rs` —
 and reports doc comments whose prose exceeds the configured word budget. Fenced
 code blocks are excluded from the count. Findings, run diagnostics, errors and
 summaries are all emitted as JSON Lines so agents and scripts can parse them
@@ -68,9 +70,18 @@ Exit codes:
   was decided against the budget
 - `1`: catastrophic / unmapped IO error
 - `2`: invalid CLI arguments
+- `3`: `--rewrite --dry-run` previewed at least one pending change — the
+  tree is not already comment-free
 - `4`: the tree did not come back clean in default mode — at least one
   doc-lint finding, or at least one undecided item
 - `5`: per-file parse or I/O errors during processing, or a write conflict
+
+Exit `3` is what makes `--rewrite --dry-run` usable as a check: it
+modifies nothing and reports "already clean" in the exit code rather
+than only in the `rewritten` field of `strip_summary`. Write mode is not
+a check — it was asked to change the tree — and exits `0` whatever it
+rewrote. Exit `5` outranks exit `3`, because a tree that could not be
+fully read is a stronger signal than a pending change.
 
 Exit `4` covers findings and indeterminates alike, because exit `0` means
 *clean* and a run that could not read everything has not shown the tree to

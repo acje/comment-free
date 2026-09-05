@@ -1350,7 +1350,8 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
     scan
 }
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
-const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
+const ALLOWED_ROOT_DIRS: &[&str] = &["benches", "crates", "examples", "src", "tests"];
+const ALLOWED_ROOT_FILES: &[&str] = &["build.rs"];
 const CARGO_MANIFEST: &str = "Cargo.toml";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootScope {
@@ -1409,18 +1410,31 @@ enum ChildRoot {
     Present,
     Absent,
 }
-fn child_source_root(child: &Path) -> Result<ChildRoot, WalkError> {
+#[derive(Debug, Clone, Copy)]
+enum RootNode {
+    Dir,
+    File,
+}
+impl RootNode {
+    fn matches(self, node: &std::fs::Metadata) -> bool {
+        match self {
+            Self::Dir => node.is_dir(),
+            Self::File => node.is_file(),
+        }
+    }
+}
+fn child_source_root(child: &Path, want: RootNode) -> Result<ChildRoot, WalkError> {
     match std::fs::symlink_metadata(child) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChildRoot::Absent),
         Err(e) => Err(WalkError::at(child, &e.to_string())),
-        Ok(node) if node.is_dir() => Ok(ChildRoot::Present),
-        Ok(node) if node.is_symlink() => resolve_child_root_link(child),
+        Ok(node) if node.is_symlink() => resolve_child_root_link(child, want),
+        Ok(node) if want.matches(&node) => Ok(ChildRoot::Present),
         Ok(_) => Ok(ChildRoot::Absent),
     }
 }
-fn resolve_child_root_link(child: &Path) -> Result<ChildRoot, WalkError> {
+fn resolve_child_root_link(child: &Path, want: RootNode) -> Result<ChildRoot, WalkError> {
     match std::fs::metadata(child) {
-        Ok(target) if target.is_dir() => Ok(ChildRoot::Present),
+        Ok(target) if want.matches(&target) => Ok(ChildRoot::Present),
         Ok(_) => Ok(ChildRoot::Absent),
         Err(e) => Err(WalkError::at(child, &e.to_string())),
     }
@@ -1430,8 +1444,14 @@ fn resolve_walk_roots(root: &Path) -> Result<Vec<PathBuf>, WalkError> {
         RootScope::SourceTree => vec![root.to_path_buf()],
         RootScope::ProjectRoot => {
             let mut bases = Vec::new();
-            for child in ALLOWED_ROOT_DIRS.iter().map(|d| root.join(d)) {
-                match child_source_root(&child)? {
+            let dirs = ALLOWED_ROOT_DIRS
+                .iter()
+                .map(|d| (root.join(d), RootNode::Dir));
+            let files = ALLOWED_ROOT_FILES
+                .iter()
+                .map(|f| (root.join(f), RootNode::File));
+            for (child, want) in dirs.chain(files) {
+                match child_source_root(&child, want)? {
                     ChildRoot::Present => bases.push(child),
                     ChildRoot::Absent => {}
                 }
@@ -1467,13 +1487,14 @@ fn walked_link(path: &Path) -> Option<Result<PathBuf, WalkError>> {
 /// Iterate every `.rs` file under `root`, yielding traversal failures
 /// rather than discarding them.
 ///
-/// Traversal is restricted to `.rs` under allowlisted source roots
-/// (`crates/`, `src/`). `root` is walked directly when so named, or
-/// when under one anchored by a sibling `Cargo.toml`; otherwise its
-/// allowlisted children are used. An ancestor merely *spelled* `src`
-/// never widens traversal. Anything unresolvable, and any unfollowed
-/// link that could hide source, surfaces as a [`WalkError`], never as
-/// scope. Build output is pruned.
+/// Traversal covers `.rs` under what cargo compiles as crate source:
+/// `benches`, `crates`, `examples`, `src`, `tests`, and a root
+/// `build.rs`. A `root` so named, or anchored by a sibling
+/// `Cargo.toml`, is walked directly; otherwise its allowlisted children
+/// are. An ancestor merely *spelled* `src` never widens traversal.
+/// Anything unresolvable, and any unfollowed link that could hide
+/// source, surfaces as a [`WalkError`], never as scope. Build output is
+/// pruned.
 pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
     let (bases, undecided) = match resolve_walk_roots(root) {
         Ok(bases) => (bases, None),
@@ -4347,6 +4368,80 @@ mod walk_root_tests {
             roots(td.path()),
             vec![td.path().join("src")],
             "an absent crates/ is a decided absence, not an error"
+        );
+    }
+    #[test]
+    fn every_cargo_standard_source_dir_is_a_walk_root() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = td.path();
+        for dir in ["benches", "crates", "examples", "src", "tests"] {
+            std::fs::create_dir(repo.join(dir)).unwrap();
+        }
+        assert_eq!(
+            roots(repo),
+            vec![
+                repo.join("benches"),
+                repo.join("crates"),
+                repo.join("examples"),
+                repo.join("src"),
+                repo.join("tests"),
+            ],
+            "cargo compiles benches/, examples/ and tests/ as crate source; a check that \
+             skips them is narrower than the claim made for it"
+        );
+    }
+    #[test]
+    fn a_supplied_root_named_as_a_cargo_test_dir_is_walked_directly() {
+        for dir in ["benches", "examples", "tests"] {
+            let supplied = PathBuf::from("/comment-free-no-such-root/proj").join(dir);
+            assert_eq!(
+                roots(&supplied),
+                vec![supplied.clone()],
+                "a root named {dir} must be walked directly, as src is"
+            );
+        }
+    }
+    #[test]
+    fn a_root_build_script_is_a_walk_root() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = td.path();
+        std::fs::create_dir(repo.join("src")).unwrap();
+        std::fs::write(repo.join("build.rs"), "fn main() {}\n").unwrap();
+        assert_eq!(
+            roots(repo),
+            vec![repo.join("src"), repo.join("build.rs")],
+            "a root build script is crate source and sits in no allowlisted directory"
+        );
+    }
+    #[test]
+    fn an_absent_root_build_script_is_a_decided_absence() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir(td.path().join("src")).unwrap();
+        assert_eq!(
+            roots(td.path()),
+            vec![td.path().join("src")],
+            "no build.rs is a decided absence, not an error"
+        );
+    }
+    #[test]
+    fn a_root_build_script_that_is_a_directory_is_not_a_walk_root() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir(td.path().join("build.rs")).unwrap();
+        assert!(
+            roots(td.path()).is_empty(),
+            "a directory spelled build.rs is not a build script"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_root_build_script_is_not_a_decided_absence() {
+        let td = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("build.rs", td.path().join("build.rs")).unwrap();
+        let e = resolve_walk_roots(td.path())
+            .expect_err("a build script that cannot be stat-ed must not be dropped as absent");
+        assert!(
+            e.path().ends_with("build.rs"),
+            "the error must name the undecidable build script, got {e:?}"
         );
     }
 }

@@ -129,21 +129,9 @@ impl DocLintOutcome {
 /// Per-file counters surfaced by the rewrite passes, aggregated across
 /// files in the run's `rewrite_summary` record.
 ///
-/// The fields are private and there is no public constructor beyond
-/// [`Default`], so the subset relationships between them — notably
-/// `inline_trimmed` ⊆ `comments_removed` — cannot be violated from
-/// outside the crate.
-///
-/// - [`RewriteCounts::comments_removed`] — non-doc line and block
-///   comments dropped.
-/// - [`RewriteCounts::inline_trimmed`] — subset of `comments_removed`:
-///   mid-line (post-code) drops that trimmed trailing whitespace.
-///   Solo-line drops are excluded.
-/// - [`RewriteCounts::blank_lines_collapsed`] — symmetric-pad
-///   collapses, one per removed comment block with blanks on both
-///   sides.
-/// - [`RewriteCounts::doc_links_rewritten`] — splices applied by the
-///   doc-link idiom canonicaliser, one per rewritten literal span.
+/// Read them through the accessors; [`Default`] is the only
+/// constructor, which is what keeps `inline_trimmed` ⊆
+/// `comments_removed`.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RewriteCounts {
     comments_removed: u32,
@@ -157,18 +145,20 @@ impl RewriteCounts {
     pub const fn comments_removed(self) -> u32 {
         self.comments_removed
     }
-    /// Mid-line drops that trimmed trailing whitespace; a subset of
-    /// [`RewriteCounts::comments_removed`].
+    /// Mid-line (post-code) drops that trimmed trailing whitespace; a
+    /// subset of [`RewriteCounts::comments_removed`] excluding
+    /// solo-line drops.
     #[must_use]
     pub const fn inline_trimmed(self) -> u32 {
         self.inline_trimmed
     }
-    /// Symmetric-pad blank-line collapses.
+    /// Symmetric-pad collapses, one per removed comment block with
+    /// blanks on both sides.
     #[must_use]
     pub const fn blank_lines_collapsed(self) -> u32 {
         self.blank_lines_collapsed
     }
-    /// Doc-link idiom splices applied.
+    /// Doc-link idiom splices applied, one per rewritten literal span.
     #[must_use]
     pub const fn doc_links_rewritten(self) -> u32 {
         self.doc_links_rewritten
@@ -207,13 +197,9 @@ pub enum CommentFreeError {
 /// errors. [`WalkError::path`] is the entry that failed, falling back
 /// to the walk root when the underlying error carries none.
 ///
-/// The underlying [`walkdir`] error is deliberately not reachable
-/// through this type. It is retained as the [`std::error::Error`]
-/// source, so the error chain is intact, but it is not named in any
-/// signature: the traversal crate is an implementation choice, and
-/// exposing its error type would make swapping or major-bumping it a
-/// breaking change to this crate's API. Callers that need the text
-/// take [`WalkError::message`].
+/// The underlying [`walkdir`] error stays the [`std::error::Error`]
+/// source but is not nameable here; take [`WalkError::message`] for its
+/// text.
 #[derive(Debug, thiserror::Error)]
 #[error("cannot traverse {}: {source}", path.display())]
 pub struct WalkError {
@@ -249,15 +235,9 @@ impl From<&CommentFreeError> for ExitCode {
 }
 /// Outcome of processing one source file.
 ///
-/// The diff and the on-disk write are separate variants because they
-/// are separate events: a [`RewriteMode::Write`] run never has a diff
-/// to report, and a [`RewriteMode::DryRun`] run always does.
-///
-/// Deliberately **not** `#[non_exhaustive]`. Callers must handle every
-/// outcome — a file that was neither rewritten, left alone, nor
-/// reported as failed has been silently dropped — so a future variant
-/// should fail their build rather than fall into a wildcard arm. The
-/// growable half of this contract is [`FileError`].
+/// Not `#[non_exhaustive]`: a caller that fails to handle an outcome
+/// has silently dropped a file, so a new variant should break their
+/// build. [`FileError`] is the growable half.
 #[derive(Debug)]
 pub enum FileOutcome {
     /// Write mode: the new content replaced the file on disk.
@@ -283,10 +263,8 @@ pub enum FileOutcome {
 }
 /// Why [`process_file`] could not process a file.
 ///
-/// Each variant is one failure class. Callers map a variant to its
-/// [`RunErrorKind`] with [`FileError::kind`] and to its operator-facing
-/// text through [`std::fmt::Display`]; neither needs to match on the
-/// variants, which is why the enum can grow.
+/// Map a variant to its record field with [`FileError::kind`] and to
+/// its operator-facing text through [`std::fmt::Display`].
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FileError {
@@ -642,31 +620,19 @@ pub fn lint_summary_record(files: u32, findings: u32, errors: u32) -> String {
     out
 }
 /// Process `path`: doc-comment link-idiom canonicalisation + lexer-based
-/// non-doc comment strip. Byte-preserving outside targets; code
-/// formatting and whitespace outside comments are untouched.
+/// non-doc comment strip. Every ordinary `//` and `/* */` comment goes;
+/// doc comments and every other byte are preserved.
 ///
-/// Returns:
+/// [`RewriteMode::Write`] yields [`FileOutcome::Rewritten`],
+/// [`RewriteMode::DryRun`] yields [`FileOutcome::WouldRewrite`] and
+/// touches nothing, and an unchanged file yields
+/// [`FileOutcome::Unchanged`] in either. [`FileOutcome::Failed`] leaves
+/// the file exactly as found; see [`FileError`].
 ///
-/// - [`FileOutcome::Rewritten`] — [`RewriteMode::Write`] replaced the
-///   file on disk.
-/// - [`FileOutcome::WouldRewrite`] — [`RewriteMode::DryRun`] produced a
-///   unified diff and wrote nothing.
-/// - [`FileOutcome::Unchanged`] — no bytes changed.
-/// - [`FileOutcome::Failed`] — see [`FileError`] for the failure
-///   classes; the file is left exactly as found in every one of them.
-///
-/// In write mode the new content lands via a sibling temporary file
-/// renamed over the destination, so the destination is never truncated
-/// in place and a partial rewrite cannot be observed. A destination
-/// that is itself a symbolic link is refused as
-/// [`FileError::SymlinkDestination`] rather than rewritten, because the
-/// rename would replace the link instead of its target. The temporary
-/// file is removed on every returning error path and, on a best-effort
-/// basis, while a panic unwinds; an abort or a failing removal can
-/// still leave it behind.
-///
-/// Stripped: every ordinary `//` line and `/* */` block comment.
-/// Preserved: doc comments (`///`, `//!`, `/** */`, `/*! */`).
+/// A write lands via a sibling temporary file renamed over the
+/// destination, so a partial rewrite is never observable. The temporary
+/// file is removed on every returning error path and, best-effort,
+/// while a panic unwinds; an abort can still leave it behind.
 #[must_use]
 pub fn process_file(path: &Path, mode: RewriteMode) -> FileOutcome {
     let original = match fs::read_to_string(path) {
@@ -1442,12 +1408,6 @@ const BARE_DOC_STEMS: &[&str] = &[
 /// `~~~`) and do not count toward the prose word budget. The linter has
 /// no semantic notion of an "example" — fence delimiters are the only
 /// signal — and enforces no limit on how many a doc comment may carry.
-///
-/// Every `usize` is a legal budget, including zero, so there is no
-/// invalid state to exclude and nothing to encapsulate. Deliberately
-/// **not** `#[non_exhaustive]`: callers construct it, and a second
-/// budget dimension would be a policy change they must react to rather
-/// than a field they can ignore.
 #[derive(Debug, Clone, Copy)]
 pub struct DocBudget {
     /// Maximum words allowed per doc comment (prose only; fenced code,
@@ -1456,11 +1416,8 @@ pub struct DocBudget {
 }
 /// Result of counting prose words in a doc comment.
 ///
-/// Deliberately **not** `#[non_exhaustive]`: these two variants are the
-/// closed domain of a completed count, and callers that do not need the
-/// distinction already have [`WordCount::count`] and
-/// [`WordCount::is_fail_closed`]. An outcome the linter could not
-/// decide is a [`DocLintOutcome`] variant, not a third count.
+/// Not `#[non_exhaustive]`: an undecidable lint result is a
+/// [`DocLintOutcome`] variant, not a third count.
 #[derive(Debug, Clone, Copy)]
 pub enum WordCount {
     /// Fence state was balanced; `count` excludes fenced code.
@@ -1485,12 +1442,8 @@ impl WordCount {
 }
 /// A single doc-comment over-budget finding emitted by [`doc_lint_file`].
 ///
-/// The count and its fail-closed provenance are one value, not a
-/// number beside a boolean that could contradict it.
-///
-/// Only [`doc_lint_file`] constructs one, so the type is
-/// `#[non_exhaustive]`: a later finding dimension is an added field,
-/// not a breaking change for the callers that only read it.
+/// The count carries its own fail-closed provenance rather than sitting
+/// beside a boolean that could contradict it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct DocFinding {

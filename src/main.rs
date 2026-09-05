@@ -115,9 +115,10 @@ struct Options {
         long,
         short = 'n',
         requires = "rewrite",
-        help = "Preview the rewrite as a unified diff without modifying files. Only meaningful \
-                with `--rewrite`. Default (lint) mode is already read-only; `--dry-run` is \
-                meaningful only with `--rewrite` (enforced by clap)"
+        help = "Preview the rewrite as a unified diff without modifying files, and exit 3 if \
+                any file would change. Only meaningful with `--rewrite`. Default (lint) mode \
+                is already read-only; `--dry-run` is meaningful only with `--rewrite` \
+                (enforced by clap)"
     )]
     dry_run: bool,
     #[arg(
@@ -222,15 +223,29 @@ fn main() -> ExitCode {
         Err(rejection) => return report_argv_rejection(&rejection),
     };
     match dispatch(opts) {
-        Ok(0) => ExitCode::SUCCESS,
-        Ok(_) => ExitCode::from(5),
+        Ok(verdict) => ExitCode::from(verdict),
         Err(e) => {
             eprintln!("error: {}", comment_free::single_line(&e.to_string()));
             ExitCode::from(&e)
         }
     }
 }
-fn dispatch(opts: Options) -> Result<u32, CommentFreeError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunVerdict {
+    Clean,
+    PendingRewrite,
+    Failed,
+}
+impl From<RunVerdict> for ExitCode {
+    fn from(verdict: RunVerdict) -> Self {
+        match verdict {
+            RunVerdict::Clean => Self::SUCCESS,
+            RunVerdict::PendingRewrite => Self::from(3),
+            RunVerdict::Failed => Self::from(5),
+        }
+    }
+}
+fn dispatch(opts: Options) -> Result<RunVerdict, CommentFreeError> {
     let deprecated_alias = opts.rustdoc_link_idioms;
     let command = Command::from_options(opts)?;
     if deprecated_alias {
@@ -242,13 +257,13 @@ fn dispatch(opts: Options) -> Result<u32, CommentFreeError> {
     }
     run(&command)
 }
-fn run(command: &Command) -> Result<u32, CommentFreeError> {
+fn run(command: &Command) -> Result<RunVerdict, CommentFreeError> {
     match command {
         Command::Rewrite { root, mode } => Ok(run_strip(root, *mode)),
         Command::Lint { root, budget } => run_lint(root, *budget),
     }
 }
-fn run_strip(root: &Path, mode: RewriteMode) -> u32 {
+fn run_strip(root: &Path, mode: RewriteMode) -> RunVerdict {
     let mut errors = 0u32;
     let doc_scan = scan_doc_files(root);
     for path in doc_scan.files() {
@@ -303,11 +318,18 @@ fn run_strip(root: &Path, mode: RewriteMode) -> u32 {
         strip_summary_record(mode, rewritten, unchanged, errors)
     );
     eprintln!("{}", rewrite_summary_record(mode, &counts_total));
-    errors
+    strip_verdict(mode, rewritten, errors)
+}
+const fn strip_verdict(mode: RewriteMode, rewritten: u32, errors: u32) -> RunVerdict {
+    match (errors, mode, rewritten) {
+        (0, RewriteMode::DryRun { .. }, 1..) => RunVerdict::PendingRewrite,
+        (0, _, _) => RunVerdict::Clean,
+        (1.., _, _) => RunVerdict::Failed,
+    }
 }
 const DOC_LINT_HINT_CAP: usize = 50;
 
-fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
+fn run_lint(root: &Path, budget: DocBudget) -> Result<RunVerdict, CommentFreeError> {
     let mut all_findings: Vec<(std::path::PathBuf, comment_free::DocFinding)> = Vec::new();
     let mut all_undecided: Vec<(std::path::PathBuf, comment_free::DocUndecided)> = Vec::new();
     let mut errors = 0u32;
@@ -383,12 +405,12 @@ fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
         lint_summary_record(files_scanned, findings_total, undecided_total, errors)
     );
     if errors > 0 {
-        return Ok(errors);
+        return Ok(RunVerdict::Failed);
     }
     if findings_total > 0 || undecided_total > 0 {
         return Err(CommentFreeError::DocLintFailure);
     }
-    Ok(0)
+    Ok(RunVerdict::Clean)
 }
 
 fn emit_doc_lint_hints(findings: &[(std::path::PathBuf, comment_free::DocFinding)]) {

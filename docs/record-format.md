@@ -210,6 +210,16 @@ distinguishable in the records: `lint_summary` counts `findings` and
 `undecided` separately, and every `doc_lint_*` record names its
 `outcome`.
 
+The same rule governs `--rewrite --dry-run`: it exits `3` when
+`strip_summary` reports `rewritten` above zero, because a preview
+holding pending changes has not shown the tree clean either. Exit `0`
+from a dry run therefore means "nothing to do", which is what makes it
+usable as a check. Write mode is not a check — it was asked to change
+the tree — so it exits `0` whatever `rewritten` reports. `errors` above
+zero outranks both and exits `5`: a tree that could not be fully read is
+a stronger signal than a pending change. No record grammar changes; the
+counters that drive this are the existing `v2` `strip_summary` fields.
+
 ### `rewrite_summary`
 
 One per `--rewrite` run including `--dry-run`, on stderr, aggregating

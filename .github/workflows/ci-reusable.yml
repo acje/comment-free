@@ -39,11 +39,7 @@ jobs:
         run: cargo run --quiet --locked -- .
         if: always()
       - name: dogfood — no non-doc comments in own source
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo run --quiet --locked -- --rewrite .
-          git diff --exit-code
+        run: cargo run --quiet --locked -- --rewrite --dry-run .
         if: always()
 
   supply-chain:

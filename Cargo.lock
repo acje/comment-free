@@ -126,7 +126,6 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "proc-macro2",
- "quote",
  "ra-ap-rustc_lexer",
  "similar",
  "syn 2.0.119",

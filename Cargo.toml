@@ -24,7 +24,6 @@ syn = { version = "2", features = [
     "visit",
     "visit-mut",
 ] }
-quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 ra-ap-rustc_lexer = "=0.174.0"
 walkdir = "2"

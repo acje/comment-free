@@ -101,6 +101,19 @@ fn schema(record: &str) -> Option<&'static [&'static str]> {
             "record", "v", "outcome", "kind", "path", "line", "item", "words", "budget",
         ]),
         "doc_lint_truncated" => Some(&["record", "v", "kind", "remaining"]),
+        "doc_lint_undecided" => Some(&[
+            "record",
+            "v",
+            "outcome",
+            "kind",
+            "path",
+            "line",
+            "item",
+            "words",
+            "budget",
+            "words_all_cfgs",
+            "fail_closed",
+        ]),
         "rewrite_summary" => Some(&[
             "record",
             "v",
@@ -114,7 +127,7 @@ fn schema(record: &str) -> Option<&'static [&'static str]> {
         "doc_file_warning" => Some(&["record", "v", "path"]),
         "rewrite_file" => Some(&["record", "v", "mode", "path"]),
         "strip_summary" => Some(&["record", "v", "mode", "rewritten", "unchanged", "errors"]),
-        "lint_summary" => Some(&["record", "v", "files", "findings", "errors"]),
+        "lint_summary" => Some(&["record", "v", "files", "findings", "undecided", "errors"]),
         _ => None,
     }
 }
@@ -885,6 +898,91 @@ fn lint_over_budget_exits_four() {
         !finding.boolean("fail_closed"),
         "unexpected fail-closed recount:\n{stdout}"
     );
+}
+fn prose_words(prefix: &str, count: usize) -> String {
+    let mut out = String::new();
+    for n in 1..=count {
+        out.push_str(prefix);
+        out.push_str(&n.to_string());
+        out.push(' ');
+    }
+    out
+}
+#[test]
+fn mutually_exclusive_cfg_docs_are_undecided_not_a_finding() {
+    let td = tempfile::tempdir().unwrap();
+    let unix_doc = prose_words("u", 45);
+    let win_doc = prose_words("w", 45);
+    let src = format!(
+        "#[cfg_attr(unix, doc = \"{unix_doc}\")]\n\
+         #[cfg_attr(windows, doc = \"{win_doc}\")]\n\
+         pub fn f() {{}}\n"
+    );
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "mutually exclusive cfg doc sets must not sum into a finding, expected exit 0, got {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        out.status.code()
+    );
+    assert!(
+        records_named(&stdout, "doc_lint_finding").is_empty(),
+        "no configuration carries both doc sets:\n{stdout}"
+    );
+    let undecided = one_record(&stdout, "doc_lint_undecided");
+    assert_eq!(undecided.text("outcome"), "configuration_dependent");
+    assert_eq!(undecided.text("kind"), "overlong_doc");
+    assert_eq!(undecided.number("v"), 2, "record version drift");
+    assert_eq!(
+        undecided.number("words"),
+        0,
+        "the unconditional set is empty:\n{stdout}"
+    );
+    assert_eq!(
+        undecided.number("words_all_cfgs"),
+        90,
+        "the all-configurations upper bound:\n{stdout}"
+    );
+    assert_eq!(undecided.number("budget"), 80);
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("findings"), 0);
+    assert_eq!(summary.number("undecided"), 1);
+    assert_eq!(summary.number("errors"), 0);
+}
+#[test]
+fn an_overlong_unconditional_doc_beside_cfg_docs_is_still_a_finding() {
+    let td = tempfile::tempdir().unwrap();
+    let long = prose_words("w", 90);
+    let src = format!(
+        "#[doc = \"{long}\"]\n\
+         #[cfg_attr(unix, doc = \" extra unix prose\")]\n\
+         pub fn f() {{}}\n"
+    );
+    write(td.path(), "a.rs", &src);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "an unconditional doc over budget is over budget in every configuration, expected exit 4, got {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        out.status.code()
+    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.text("outcome"), "finding");
+    assert_eq!(
+        finding.number("words"),
+        90,
+        "a finding reports the count every configuration carries:\n{stdout}"
+    );
+    assert!(
+        records_named(&stdout, "doc_lint_undecided").is_empty(),
+        "a proven finding is not also undecided:\n{stdout}"
+    );
+    assert_eq!(one_record(&stderr, "lint_summary").number("undecided"), 0);
 }
 #[test]
 fn lint_over_budget_emits_header_once_then_hint() {
@@ -1982,6 +2080,8 @@ fn doc_lint_record_grammar_const_is_published() {
         "doc_lint_header",
         "doc_lint_hint",
         "doc_lint_truncated",
+        "doc_lint_undecided",
+        "\"words_all_cfgs\":<U32>",
         "\"outcome\":<OUTCOME>",
         "\"doctrine\":<STRING>",
         "\"words\":<U32>",
@@ -2379,6 +2479,7 @@ fn diagnostic_record_grammar_constant_documents_the_family() {
         "rewrite_file",
         "strip_summary",
         "lint_summary",
+        "\"undecided\":<U32>",
         "\"v\":<N>",
         "\"path\":<PATH>",
     ] {

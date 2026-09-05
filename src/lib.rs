@@ -29,7 +29,8 @@ pub const DOC_LINT_RECORD_GRAMMAR: &str = "\
 {\"record\":\"doc_lint_finding\",\"v\":<N>,\"outcome\":<OUTCOME>,\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"words\":<U32>,\"budget\":<U32>,\"fail_closed\":<BOOL>}
 {\"record\":\"doc_lint_header\",\"v\":<N>,\"kind\":<KIND>,\"doctrine\":<STRING>}
 {\"record\":\"doc_lint_hint\",\"v\":<N>,\"outcome\":<OUTCOME>,\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"words\":<U32>,\"budget\":<U32>}
-{\"record\":\"doc_lint_truncated\",\"v\":<N>,\"kind\":<KIND>,\"remaining\":<U32>}";
+{\"record\":\"doc_lint_truncated\",\"v\":<N>,\"kind\":<KIND>,\"remaining\":<U32>}
+{\"record\":\"doc_lint_undecided\",\"v\":<N>,\"outcome\":<OUTCOME>,\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"words\":<U32>,\"budget\":<U32>,\"words_all_cfgs\":<U32>,\"fail_closed\":<BOOL>}";
 /// Version carried by the `v` field of the `rewrite_summary` record.
 ///
 /// Independent of [`DOC_LINT_RECORD_VERSION`]: the rewrite-summary
@@ -62,7 +63,7 @@ pub const DIAGNOSTIC_RECORD_GRAMMAR: &str = "\
 {\"record\":\"doc_file_warning\",\"v\":<N>,\"path\":<PATH>}
 {\"record\":\"rewrite_file\",\"v\":<N>,\"mode\":<MODE>,\"path\":<PATH>}
 {\"record\":\"strip_summary\",\"v\":<N>,\"mode\":<MODE>,\"rewritten\":<U32>,\"unchanged\":<U32>,\"errors\":<U32>}
-{\"record\":\"lint_summary\",\"v\":<N>,\"files\":<U32>,\"findings\":<U32>,\"errors\":<U32>}";
+{\"record\":\"lint_summary\",\"v\":<N>,\"files\":<U32>,\"findings\":<U32>,\"undecided\":<U32>,\"errors\":<U32>}";
 /// Which pass a `--rewrite` run made over the tree.
 ///
 /// The unified-diff context width is carried by [`RewriteMode::DryRun`]
@@ -107,15 +108,18 @@ impl DocLintKind {
 }
 /// What a `doc_lint_*` record asserts about the item it names.
 ///
-/// Reserved so a later lint pass that cannot decide an item — an
-/// unresolved `cfg` predicate, an uninspected macro body — reports an
-/// explicit indeterminate outcome as an added variant rather than a
-/// record-version bump.
+/// A pass that cannot decide an item — an unresolved `cfg` predicate, an
+/// uninspected macro body — reports an explicit indeterminate outcome as
+/// an added variant rather than a record-version bump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DocLintOutcome {
     /// The item was inspected and violates the budget.
     Finding,
+    /// The item's doc set depends on unresolved `cfg` predicates: it is
+    /// within budget for at least one configuration and over budget for
+    /// at least one other. Not a finding, and not clean.
+    ConfigurationDependent,
 }
 impl DocLintOutcome {
     /// The `outcome` field value carried by emitted records.
@@ -123,6 +127,7 @@ impl DocLintOutcome {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Finding => "finding",
+            Self::ConfigurationDependent => "configuration_dependent",
         }
     }
 }
@@ -470,6 +475,45 @@ pub fn doc_lint_finding_record(
     out.push('}');
     out
 }
+/// The `doc_lint_undecided` record naming one item whose doc set the
+/// linter could not decide.
+///
+/// The `words` field carries the unconditional doc set alone — present
+/// in every configuration — and `words_all_cfgs` the count with every
+/// `cfg_attr` doc payload active. The item is over budget only for some
+/// configurations, so this is explicitly not a finding.
+#[must_use]
+pub fn doc_lint_undecided_record(
+    kind: DocLintKind,
+    path: &Path,
+    undecided: &DocUndecided,
+) -> String {
+    let mut out = open_record("doc_lint_undecided", DOC_LINT_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "outcome", undecided.outcome().as_str());
+    out.push(',');
+    push_hint_body(
+        &mut out,
+        kind,
+        path,
+        undecided.line(),
+        undecided.item_label(),
+        undecided.unconditional_words().count(),
+        undecided.budget(),
+    );
+    out.push(',');
+    push_count(
+        &mut out,
+        "words_all_cfgs",
+        undecided.all_configurations_words().count(),
+    );
+    out.push(',');
+    push_json_string(&mut out, "fail_closed");
+    let fail_closed = undecided.all_configurations_words().is_fail_closed();
+    write!(out, ":{fail_closed}").expect("Write for String never fails");
+    out.push('}');
+    out
+}
 fn push_hint_body(
     out: &mut String,
     kind: DocLintKind,
@@ -640,12 +684,14 @@ pub fn strip_summary_record(
 }
 /// The `lint_summary` record closing a default-mode lint run.
 #[must_use]
-pub fn lint_summary_record(files: u32, findings: u32, errors: u32) -> String {
+pub fn lint_summary_record(files: u32, findings: u32, undecided: u32, errors: u32) -> String {
     let mut out = open_record("lint_summary", DIAGNOSTIC_RECORD_VERSION);
     out.push(',');
     push_number(&mut out, "files", files);
     out.push(',');
     push_number(&mut out, "findings", findings);
+    out.push(',');
+    push_number(&mut out, "undecided", undecided);
     out.push(',');
     push_number(&mut out, "errors", errors);
     out.push('}');
@@ -1399,43 +1445,195 @@ impl DocFinding {
         self.budget
     }
 }
+/// An item whose doc set the linter could not decide, because part of
+/// it sits behind unresolved `cfg` predicates.
+///
+/// Carries both bounds: the unconditional count present in every
+/// configuration, and the count with every `cfg_attr` doc payload
+/// active. The first is within budget and the second is not, so no
+/// single verdict holds for every build. Has no public constructor.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DocUndecided {
+    item_label: String,
+    line: usize,
+    unconditional_words: WordCount,
+    all_configurations_words: WordCount,
+    budget: usize,
+}
+impl DocUndecided {
+    /// Human-readable label for the docced item, e.g. `"fn foo"`.
+    #[must_use]
+    pub fn item_label(&self) -> &str {
+        &self.item_label
+    }
+    /// Approximate source line of the docced item.
+    #[must_use]
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+    /// Prose word count of the doc set present in every configuration.
+    #[must_use]
+    pub const fn unconditional_words(&self) -> WordCount {
+        self.unconditional_words
+    }
+    /// Prose word count with every `cfg_attr` doc payload active.
+    #[must_use]
+    pub const fn all_configurations_words(&self) -> WordCount {
+        self.all_configurations_words
+    }
+    /// The budget the upper bound exceeded.
+    #[must_use]
+    pub const fn budget(&self) -> usize {
+        self.budget
+    }
+    /// The outcome this item's record asserts.
+    #[must_use]
+    pub const fn outcome(&self) -> DocLintOutcome {
+        DocLintOutcome::ConfigurationDependent
+    }
+}
+/// What one [`doc_lint_file`] pass established about a file.
+///
+/// Findings and undecided items are separate sequences rather than one
+/// sequence tagged by outcome, so a caller counting findings for an exit
+/// code cannot count an item the linter never decided.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct DocLintReport {
+    findings: Vec<DocFinding>,
+    undecided: Vec<DocUndecided>,
+}
+impl DocLintReport {
+    /// Items proven over budget in every configuration.
+    #[must_use]
+    pub fn findings(&self) -> &[DocFinding] {
+        &self.findings
+    }
+    /// Items whose verdict depends on unresolved `cfg` predicates.
+    #[must_use]
+    pub fn undecided(&self) -> &[DocUndecided] {
+        &self.undecided
+    }
+}
 /// Lint `ast` for doc-comments whose prose word count exceeds `budget.max_words`.
 ///
-/// Concatenates `///`, `//!`, `#[doc=...]`, and `cfg_attr` doc payloads in
-/// source order; only triple-backtick fenced lines are excluded from the count.
-/// Docs inside opaque macro bodies are not visited.
+/// `///`, `//!` and `#[doc=...]` payloads are concatenated in source
+/// order and counted as one document. `cfg_attr` doc payloads are held
+/// separately: their predicates are unresolved here and two of them may
+/// be mutually exclusive. An item is a finding only when its
+/// unconditional doc set alone exceeds the budget, and undecided when
+/// only some configurations do. Fenced lines are excluded. Docs inside
+/// opaque macro bodies are not visited.
 #[must_use]
-pub fn doc_lint_file(ast: &syn::File, budget: DocBudget) -> Vec<DocFinding> {
+pub fn doc_lint_file(ast: &syn::File, budget: DocBudget) -> DocLintReport {
     let mut visitor = DocLintVisitor {
         budget,
-        findings: Vec::new(),
+        report: DocLintReport::default(),
     };
     visitor.lint_attrs(&ast.attrs, "file-level", None);
     syn::visit::Visit::visit_file(&mut visitor, ast);
-    visitor.findings
+    visitor.report
 }
 struct DocLintVisitor {
     budget: DocBudget,
-    findings: Vec<DocFinding>,
+    report: DocLintReport,
 }
 impl DocLintVisitor {
     fn lint_attrs(&mut self, attrs: &[Attribute], label: &str, span_line: Option<usize>) {
-        let Some((text, attr_line)) = extract_doc_text(attrs) else {
+        let Some(docs) = extract_doc_text(attrs) else {
             return;
         };
-        let words = prose_word_count(&text);
-        if words.count() > self.budget.max_words {
-            self.findings.push(DocFinding {
+        let line = span_line.unwrap_or(docs.line);
+        match decide_doc_budget(&docs, self.budget.max_words) {
+            DocVerdict::Clean => {}
+            DocVerdict::Overlong(words) => self.report.findings.push(DocFinding {
                 item_label: label.to_string(),
-                line: span_line.unwrap_or(attr_line),
+                line,
                 words,
                 budget: self.budget.max_words,
-            });
+            }),
+            DocVerdict::ConfigurationDependent {
+                unconditional,
+                all_configurations,
+            } => self.report.undecided.push(DocUndecided {
+                item_label: label.to_string(),
+                line,
+                unconditional_words: unconditional,
+                all_configurations_words: all_configurations,
+                budget: self.budget.max_words,
+            }),
         }
     }
 }
-fn extract_doc_text(attrs: &[Attribute]) -> Option<(String, usize)> {
-    let mut parts: Vec<String> = Vec::new();
+enum DocVerdict {
+    Clean,
+    Overlong(WordCount),
+    ConfigurationDependent {
+        unconditional: WordCount,
+        all_configurations: WordCount,
+    },
+}
+fn decide_doc_budget(docs: &ItemDocs, budget: usize) -> DocVerdict {
+    let all = prose_word_count(&docs.all_configurations_text());
+    if !docs.has_conditional() {
+        return if all.count() > budget {
+            DocVerdict::Overlong(all)
+        } else {
+            DocVerdict::Clean
+        };
+    }
+    if all.count() <= budget {
+        return DocVerdict::Clean;
+    }
+    let unconditional = prose_word_count(&docs.unconditional_text());
+    let split_broke_a_fence = unconditional.is_fail_closed() && !all.is_fail_closed();
+    if unconditional.count() > budget && !split_broke_a_fence {
+        return DocVerdict::Overlong(unconditional);
+    }
+    DocVerdict::ConfigurationDependent {
+        unconditional,
+        all_configurations: all,
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocOrigin {
+    Unconditional,
+    Conditional,
+}
+#[derive(Debug, Clone)]
+struct DocPart {
+    origin: DocOrigin,
+    payload: String,
+}
+#[derive(Debug, Clone)]
+struct ItemDocs {
+    line: usize,
+    parts: Vec<DocPart>,
+}
+impl ItemDocs {
+    fn has_conditional(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|p| p.origin == DocOrigin::Conditional)
+    }
+    fn unconditional_text(&self) -> String {
+        self.text(|p| p.origin == DocOrigin::Unconditional)
+    }
+    fn all_configurations_text(&self) -> String {
+        self.text(|_| true)
+    }
+    fn text(&self, keep: impl Fn(&DocPart) -> bool) -> String {
+        self.parts
+            .iter()
+            .filter(|p| keep(p))
+            .map(|p| p.payload.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+fn extract_doc_text(attrs: &[Attribute]) -> Option<ItemDocs> {
+    let mut parts: Vec<DocPart> = Vec::new();
     let mut first_line: Option<usize> = None;
     for attr in attrs {
         let line = attr
@@ -1446,18 +1644,24 @@ fn extract_doc_text(attrs: &[Attribute]) -> Option<(String, usize)> {
             if first_line.is_none() {
                 first_line = Some(line);
             }
-            parts.push(payload);
+            parts.push(DocPart {
+                origin: DocOrigin::Unconditional,
+                payload,
+            });
         } else if is_cfg_attr(attr) {
             for payload in cfg_attr_doc_payloads(attr) {
                 if first_line.is_none() {
                     first_line = Some(line);
                 }
-                parts.push(payload);
+                parts.push(DocPart {
+                    origin: DocOrigin::Conditional,
+                    payload,
+                });
             }
         }
     }
     let line = first_line?;
-    Some((parts.join("\n"), line))
+    Some(ItemDocs { line, parts })
 }
 fn doc_payload(attr: &Attribute) -> Option<String> {
     let Meta::NameValue(nv) = &attr.meta else {
@@ -2148,6 +2352,11 @@ mod doc_lint_tests {
     use syn::parse_quote;
     fn lint(file: &syn::File, max_words: usize) -> Vec<super::DocFinding> {
         doc_lint_file(file, DocBudget { max_words })
+            .findings()
+            .to_vec()
+    }
+    fn report(file: &syn::File, max_words: usize) -> super::DocLintReport {
+        doc_lint_file(file, DocBudget { max_words })
     }
     #[test]
     fn no_docs_yields_no_findings() {
@@ -2202,14 +2411,69 @@ mod doc_lint_tests {
         assert_eq!(findings[0].words.count(), 15);
     }
     #[test]
-    fn cfg_attr_doc_payload_counted() {
+    fn cfg_attr_doc_payload_counted_towards_the_undecided_upper_bound() {
         let f: syn::File = parse_quote! {
             #[doc = " w01 w02 w03 w04 w05"] #[cfg_attr(test, doc =
             "w06 w07 w08 w09 w10")] pub fn foo() {}
         };
-        let findings = lint(&f, 7);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].words.count(), 10);
+        let r = report(&f, 7);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(r.undecided().len(), 1);
+        assert_eq!(r.undecided()[0].unconditional_words().count(), 5);
+        assert_eq!(r.undecided()[0].all_configurations_words().count(), 10);
+        assert_eq!(
+            r.undecided()[0].outcome(),
+            super::DocLintOutcome::ConfigurationDependent
+        );
+    }
+    #[test]
+    fn mutually_exclusive_cfg_docs_are_not_summed_into_a_finding() {
+        let f: syn::File = parse_quote! {
+            #[cfg_attr(unix, doc = " w01 w02 w03 w04 w05 w06")] #[cfg_attr(windows, doc =
+            " w07 w08 w09 w10 w11 w12")] pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
+        assert_eq!(r.undecided()[0].unconditional_words().count(), 0);
+        assert_eq!(r.undecided()[0].all_configurations_words().count(), 12);
+        assert_eq!(r.undecided()[0].budget(), 8);
+    }
+    #[test]
+    fn unconditional_docs_over_budget_stay_a_finding_beside_cfg_docs() {
+        let f: syn::File = parse_quote! {
+            #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix, doc =
+            " w11 w12 w13")] pub fn foo() {}
+        };
+        let r = report(&f, 8);
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+        assert_eq!(r.findings().len(), 1);
+        assert_eq!(
+            r.findings()[0].words().count(),
+            10,
+            "a finding must report the count every configuration carries"
+        );
+    }
+    #[test]
+    fn cfg_docs_within_budget_in_every_configuration_are_clean() {
+        let f: syn::File = parse_quote! {
+            #[doc = " w01 w02"] #[cfg_attr(unix, doc = " w03 w04")] #[cfg_attr(windows, doc =
+            " w05 w06")] pub fn foo() {}
+        };
+        let r = report(&f, 6);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert!(r.undecided().is_empty(), "{:?}", r.undecided());
+    }
+    #[test]
+    fn a_fence_split_across_a_cfg_boundary_is_undecided_not_a_finding() {
+        let f: syn::File = parse_quote! {
+            #[doc = " ```"] #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix,
+            doc = " ```")] #[doc = " w11 w12 w13 w14 w15"] pub fn foo() {}
+        };
+        let r = report(&f, 3);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
+        assert!(r.undecided()[0].unconditional_words().is_fail_closed());
     }
     #[test]
     fn doc_inside_macro_rules_not_linted() {

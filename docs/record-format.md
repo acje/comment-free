@@ -87,6 +87,34 @@ Up to 50 per kind, on stdout, sorted by `words - budget` descending. A
 {"record":"doc_lint_truncated","v":2,"kind":"overlong_doc","remaining":10}
 ```
 
+### `doc_lint_undecided`
+
+One per item whose doc set the linter could not decide, on stdout.
+
+```json
+{"record":"doc_lint_undecided","v":2,"outcome":"configuration_dependent","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":40,"budget":80,"words_all_cfgs":95,"fail_closed":false}
+```
+
+`cfg_attr` doc payloads are held apart from the unconditional doc set,
+because their predicates are not resolved by this tool and two of them
+may be mutually exclusive — a `unix` and a `windows` doc set are never
+both present in one build. Summing them would manufacture a word count
+no build exposes.
+
+`words` is therefore the count of the unconditional doc set alone, which
+every configuration carries, and `words_all_cfgs` the count with every
+`cfg_attr` doc payload active. This record is emitted when `words` is
+within budget and `words_all_cfgs` is not: the item is over budget for
+some configurations and within it for others.
+
+It is **not** a finding. It does not increment the `findings` counter and
+does not drive exit code 4; it increments `undecided` in `lint_summary`.
+An item whose unconditional doc set alone exceeds the budget is over
+budget in every configuration and is reported as an ordinary
+`doc_lint_finding`.
+
+`fail_closed` reports the balance state of the `words_all_cfgs` count.
+
 ### `rewrite_summary`
 
 One per `--rewrite` run including `--dry-run`, on stderr, aggregating
@@ -153,8 +181,12 @@ One per `--rewrite` run including `--dry-run`, on stderr, closing the run.
 One per default-mode lint run, on stderr, closing the run.
 
 ```json
-{"record":"lint_summary","v":2,"files":12,"findings":3,"errors":0}
+{"record":"lint_summary","v":2,"files":12,"findings":3,"undecided":1,"errors":0}
 ```
+
+`undecided` counts `doc_lint_undecided` records. It is reported
+separately from `findings` precisely because an item the linter could
+not decide is neither a finding nor clean.
 
 ## Compatibility rules for consumers
 
@@ -172,12 +204,13 @@ does not is not a conforming consumer.
 4. **Treat an unknown `kind` value as indeterminate, never as clean.**
    New finding kinds may be added within the same version.
 5. **Treat an unknown `outcome` value as indeterminate, never as
-   clean.** The only value emitted today is `finding`; the field exists
-   so that a pass which *cannot decide* an item can say so explicitly.
-   Planned indeterminate outcomes include configuration-dependent doc
-   sets behind unresolved `cfg` predicates, and doc comments generated
-   inside uninspected macro bodies. Those will arrive as an added
-   `outcome` value with additional keys, under `v=2`.
+   clean.** Two values are emitted today: `finding`, and
+   `configuration_dependent` on the `doc_lint_undecided` record, where a
+   doc set behind unresolved `cfg` predicates is over budget for some
+   configurations only. A further indeterminate outcome is planned for
+   doc comments generated inside uninspected macro bodies. Such
+   additions arrive as an added `outcome` value with additional keys,
+   under `v=2`.
 6. **Reject duplicate keys.** A record with a repeated key is malformed;
    do not keep the last value.
 7. **Reject a record carrying a key not in its schema** if you are

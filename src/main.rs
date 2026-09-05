@@ -4,9 +4,9 @@ use clap::Parser;
 use comment_free::{
     CommentFreeError, DocBudget, DocLintKind, FileOutcome, RewriteCounts, RewriteMode,
     RunErrorKind, doc_file_warning_record, doc_lint_file, doc_lint_finding_record,
-    doc_lint_header_record, doc_lint_hint_record, doc_lint_truncated_record, lint_summary_record,
-    process_file, rewrite_file_record, rewrite_summary_record, run_error_record, scan_doc_files,
-    strip_summary_record, walk_rs_files,
+    doc_lint_header_record, doc_lint_hint_record, doc_lint_truncated_record,
+    doc_lint_undecided_record, lint_summary_record, process_file, rewrite_file_record,
+    rewrite_summary_record, run_error_record, scan_doc_files, strip_summary_record, walk_rs_files,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -38,6 +38,7 @@ use std::process::ExitCode;
                     doc_lint_header    one per finding kind, names the doctrine once\n\
                     doc_lint_hint      up to 50 per kind, sorted by overshoot descending\n\
                     doc_lint_truncated tail summary when a kind has > 50 findings\n\
+                    doc_lint_undecided one per item whose doc set depends on `cfg`\n\
                     run_error          one per failed path: kind, path, message\n\
                     doc_file_warning   one per documentation file left untouched\n\
                     rewrite_file       one per changed file: mode, path\n\
@@ -63,7 +64,8 @@ use std::process::ExitCode;
                   on stderr.\n\
                   \n\
                   Exit codes:\n\
-                    0  clean (no findings, no errors)\n\
+                    0  clean (no findings, no errors); an undecided,\n\
+                       configuration-dependent doc set is reported, not a finding\n\
                     1  catastrophic / unmapped IO error\n\
                     2  invalid CLI arguments (clap rejection)\n\
                     4  doc-lint findings observed (default mode)\n\
@@ -286,6 +288,7 @@ const DOC_LINT_HINT_CAP: usize = 50;
 
 fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
     let mut all_findings: Vec<(std::path::PathBuf, comment_free::DocFinding)> = Vec::new();
+    let mut all_undecided: Vec<(std::path::PathBuf, comment_free::DocUndecided)> = Vec::new();
     let mut errors = 0u32;
     let mut files_scanned = 0u32;
     for walked in walk_rs_files(root) {
@@ -323,11 +326,16 @@ fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
                 continue;
             }
         };
-        for finding in doc_lint_file(&ast, budget) {
-            all_findings.push((path.clone(), finding));
+        let report = doc_lint_file(&ast, budget);
+        for finding in report.findings() {
+            all_findings.push((path.clone(), finding.clone()));
+        }
+        for undecided in report.undecided() {
+            all_undecided.push((path.clone(), undecided.clone()));
         }
     }
     let findings_total = u32::try_from(all_findings.len()).unwrap_or(u32::MAX);
+    let undecided_total = u32::try_from(all_undecided.len()).unwrap_or(u32::MAX);
     for (path, finding) in &all_findings {
         println!(
             "{}",
@@ -342,10 +350,16 @@ fn run_lint(root: &Path, budget: DocBudget) -> Result<u32, CommentFreeError> {
             )
         );
     }
+    for (path, undecided) in &all_undecided {
+        println!(
+            "{}",
+            doc_lint_undecided_record(DocLintKind::OverlongDoc, path, undecided)
+        );
+    }
     emit_doc_lint_hints(&all_findings);
     eprintln!(
         "{}",
-        lint_summary_record(files_scanned, findings_total, errors)
+        lint_summary_record(files_scanned, findings_total, undecided_total, errors)
     );
     if errors > 0 {
         return Ok(errors);

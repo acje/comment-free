@@ -12,65 +12,115 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::{Attribute, File, Meta, Token};
 use walkdir::WalkDir;
-/// Doctrine warning emitted on the `DOC_LINT_HEADER` for every kind.
-pub const DOC_LINT_DOCTRINE_MSG: &str = "Rust docs must contain a concise summary, optionally 0-3 clear code examples (fenced ``` or ~~~ blocks), and sections explaining edge cases like panics, errors, and safety. Fenced code examples are excluded from the prose word length. If applicable references to ADRs must be given.";
-/// Stable record-format version emitted on every `DOC_LINT_HEADER`,
-/// `DOC_LINT_HINT`, and `DOC_LINT_TRUNCATED` line as `v=<N>`. Consumers
-/// reject records whose `v=` is greater than the version they understand;
-/// bumped on any incompatible field-shape change.
-pub const DOC_LINT_RECORD_VERSION: u32 = 1;
-/// Grammar of the structured lint records emitted in default lint mode,
-/// in BNF-ish form. Stable across patch versions for a fixed
-/// [`DOC_LINT_RECORD_VERSION`]; intended for external agent parsers and
-/// for the binary's `--help` output.
+/// Doctrine warning carried by the `doc_lint_header` record for every kind.
+pub const DOC_LINT_DOCTRINE_MSG: &str = "Rust docs must contain a concise summary, optionally clear code examples (fenced ``` or ~~~ blocks), and sections explaining edge cases like panics, errors, and safety. Fenced code examples are excluded from the prose word length. If applicable references to ADRs must be given.";
+/// Version carried by the `v` field of every `doc_lint_*` record.
 ///
-/// Tab characters (`\t`) separate fields; every record terminates with
-/// `\n`. Field order is fixed.
+/// Consumers reject records whose `v` exceeds the version they
+/// understand. See `docs/record-format.md` for the record grammar and
+/// the compatibility rules that let new fields, kinds, and outcomes
+/// arrive without a bump.
+pub const DOC_LINT_RECORD_VERSION: u32 = 2;
+/// One-line JSON templates for the `doc_lint_*` record family, for the
+/// binary's `--help` output.
 ///
-/// ```text
-/// DOC_LINT_HEADER\tkind=<KIND>\tv=<N>\tdoctrine=<STRING>\n
-/// DOC_LINT_HINT\t<PATH>:<LINE>\titem=<LABEL>\twords=<U32>\tbudget=<U32>\tkind=<KIND>\tv=<N>\n
-/// DOC_LINT_TRUNCATED\tkind=<KIND>\tremaining=<U32>\tv=<N>\n
-/// ```
-///
-/// Today `<KIND>` is always `overlong_doc`; new finding kinds emit
-/// their own `DOC_LINT_HEADER` and a separate run of `DOC_LINT_HINT`
-/// records. `<PATH>` is the path as walked by the tool and may contain
-/// path separators; `<LABEL>` is human-readable and may contain spaces
-/// but never a tab. Hints are sorted by `(words - budget)` descending
-/// before the cap of 50 records per kind is applied.
+/// Authoritative grammar: `docs/record-format.md`.
 pub const DOC_LINT_RECORD_GRAMMAR: &str = "\
-DOC_LINT_HEADER\\tkind=<KIND>\\tv=<N>\\tdoctrine=<STRING>\\n
-DOC_LINT_HINT\\t<PATH>:<LINE>\\titem=<LABEL>\\twords=<U32>\\tbudget=<U32>\\tkind=<KIND>\\tv=<N>\\n
-DOC_LINT_TRUNCATED\\tkind=<KIND>\\tremaining=<U32>\\tv=<N>\\n";
-/// Stable record-format version emitted on every `REWRITE_SUMMARY`
-/// line as `v=<N>`. Independent of [`DOC_LINT_RECORD_VERSION`]: the
-/// rewrite-summary record family evolves on its own cadence. Consumers
-/// reject records whose `v=` exceeds the version they understand;
-/// bumped on any incompatible field-shape change.
-pub const REWRITE_RECORD_VERSION: u32 = 1;
-/// Grammar of the structured rewrite-summary record emitted on stderr
-/// at the end of every `--rewrite` run (including `--dry-run`), in
-/// BNF-ish form. Stable across patch versions for a fixed
-/// [`REWRITE_RECORD_VERSION`]; intended for external agent parsers
-/// and for the binary's `--help` output.
+{\"record\":\"doc_lint_finding\",\"v\":<N>,\"outcome\":<OUTCOME>,\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"words\":<U32>,\"budget\":<U32>,\"fail_closed\":<BOOL>}
+{\"record\":\"doc_lint_header\",\"v\":<N>,\"kind\":<KIND>,\"doctrine\":<STRING>}
+{\"record\":\"doc_lint_hint\",\"v\":<N>,\"outcome\":<OUTCOME>,\"kind\":<KIND>,\"path\":<PATH>,\"line\":<U32>,\"item\":<LABEL>,\"words\":<U32>,\"budget\":<U32>}
+{\"record\":\"doc_lint_truncated\",\"v\":<N>,\"kind\":<KIND>,\"remaining\":<U32>}";
+/// Version carried by the `v` field of the `rewrite_summary` record.
 ///
-/// Tab characters (`\t`) separate fields; every record terminates
-/// with `\n`. Field order is fixed.
+/// Independent of [`DOC_LINT_RECORD_VERSION`]: the rewrite-summary
+/// family evolves on its own cadence. See `docs/record-format.md`.
+pub const REWRITE_RECORD_VERSION: u32 = 2;
+/// One-line JSON template for the `rewrite_summary` record, for the
+/// binary's `--help` output.
 ///
-/// ```text
-/// REWRITE_SUMMARY\tmode=<MODE>\tcomments_removed=<U32>\tinline_trimmed=<U32>\tblank_lines_collapsed=<U32>\tdoc_links_rewritten=<U32>\tsafety_preserved=<U32>\tauto_trait_preserved=<U32>\tv=<N>\n
-/// ```
-///
-/// `<MODE>` is `write` or `dry-run`, matching the legacy `SUMMARY`
-/// record's `mode=` field. The counters aggregate across every
-/// processed file in the run. The record is additive: the legacy
-/// `SUMMARY\tmode=…\trewritten=…\tunchanged=…\terrors=…` line is
-/// emitted unchanged on the same stream.
+/// Authoritative grammar: `docs/record-format.md`.
 pub const REWRITE_RECORD_GRAMMAR: &str = "\
-REWRITE_SUMMARY\\tmode=<MODE>\\tcomments_removed=<U32>\\tinline_trimmed=<U32>\\tblank_lines_collapsed=<U32>\\tdoc_links_rewritten=<U32>\\tsafety_preserved=<U32>\\tauto_trait_preserved=<U32>\\tv=<N>\\n";
+{\"record\":\"rewrite_summary\",\"v\":<N>,\"mode\":<MODE>,\"comments_removed\":<U32>,\"inline_trimmed\":<U32>,\"blank_lines_collapsed\":<U32>,\"doc_links_rewritten\":<U32>}";
+/// Version carried by the `v` field of every run-diagnostic record:
+/// `run_error`, `doc_file_warning`, `rewrite_file`, `strip_summary`,
+/// and `lint_summary`.
+///
+/// Independent of [`DOC_LINT_RECORD_VERSION`] and
+/// [`REWRITE_RECORD_VERSION`]. These lines were previously emitted as
+/// the unversioned tab-separated `SUMMARY`, `REWRITE`, `WOULD_REWRITE`,
+/// `DOC_WARN`, `WALK_ERROR`, `IO_ERROR`, `PARSE_ERROR` and
+/// `CONFLICT_ERROR` diagnostics, which carried raw unescaped paths; they
+/// join the JSON Lines contract at the same version the other families
+/// bumped to. See `docs/record-format.md`.
+pub const DIAGNOSTIC_RECORD_VERSION: u32 = 2;
+/// One-line JSON templates for the run-diagnostic record family, for the
+/// binary's `--help` output.
+///
+/// Authoritative grammar: `docs/record-format.md`.
+pub const DIAGNOSTIC_RECORD_GRAMMAR: &str = "\
+{\"record\":\"run_error\",\"v\":<N>,\"kind\":<ERROR_KIND>,\"path\":<PATH>,\"message\":<STRING>}
+{\"record\":\"doc_file_warning\",\"v\":<N>,\"path\":<PATH>}
+{\"record\":\"rewrite_file\",\"v\":<N>,\"mode\":<MODE>,\"path\":<PATH>}
+{\"record\":\"strip_summary\",\"v\":<N>,\"mode\":<MODE>,\"rewritten\":<U32>,\"unchanged\":<U32>,\"errors\":<U32>}
+{\"record\":\"lint_summary\",\"v\":<N>,\"files\":<U32>,\"findings\":<U32>,\"errors\":<U32>}";
+/// Which pass a `--rewrite` run made over the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RewriteMode {
+    /// Files were replaced on disk.
+    Write,
+    /// Diffs were printed and no file was touched.
+    DryRun,
+}
+impl RewriteMode {
+    /// The `mode` field value carried by emitted records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Write => "write",
+            Self::DryRun => "dry-run",
+        }
+    }
+}
+/// Finding kind carried by the `kind` field of every `doc_lint_*` record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DocLintKind {
+    /// Doc-comment prose exceeded the configured word budget.
+    OverlongDoc,
+}
+impl DocLintKind {
+    /// The `kind` field value carried by emitted records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OverlongDoc => "overlong_doc",
+        }
+    }
+}
+/// What a `doc_lint_*` record asserts about the item it names.
+///
+/// Reserved so a later lint pass that cannot decide an item — an
+/// unresolved `cfg` predicate, an uninspected macro body — reports an
+/// explicit indeterminate outcome as an added variant rather than a
+/// record-version bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DocLintOutcome {
+    /// The item was inspected and violates the budget.
+    Finding,
+}
+impl DocLintOutcome {
+    /// The `outcome` field value carried by emitted records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Finding => "finding",
+        }
+    }
+}
 /// Per-file counters surfaced by the rewrite passes, aggregated across
-/// files in `main`'s `REWRITE_SUMMARY` emission. All fields default to
+/// files in the run's `rewrite_summary` record. All fields default to
 /// zero; `#[non_exhaustive]` allows new counters without a breaking
 /// change. Construct with `RewriteCounts::default()` and update fields
 /// explicitly.
@@ -83,8 +133,6 @@ REWRITE_SUMMARY\\tmode=<MODE>\\tcomments_removed=<U32>\\tinline_trimmed=<U32>\\t
 ///   removed comment block with blanks on both sides.
 /// - `doc_links_rewritten` — splices applied by the doc-link idiom
 ///   canonicaliser, one per rewritten literal span.
-/// - `safety_preserved` — `// SAFETY:` / `// SAFETY` lines kept.
-/// - `auto_trait_preserved` — `AUTO-TRAIT-POLICY-{BEGIN,END}` lines kept.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RewriteCounts {
@@ -92,8 +140,6 @@ pub struct RewriteCounts {
     pub inline_trimmed: u32,
     pub blank_lines_collapsed: u32,
     pub doc_links_rewritten: u32,
-    pub safety_preserved: u32,
-    pub auto_trait_preserved: u32,
 }
 impl std::ops::AddAssign for RewriteCounts {
     fn add_assign(&mut self, rhs: Self) {
@@ -105,10 +151,6 @@ impl std::ops::AddAssign for RewriteCounts {
         self.doc_links_rewritten = self
             .doc_links_rewritten
             .saturating_add(rhs.doc_links_rewritten);
-        self.safety_preserved = self.safety_preserved.saturating_add(rhs.safety_preserved);
-        self.auto_trait_preserved = self
-            .auto_trait_preserved
-            .saturating_add(rhs.auto_trait_preserved);
     }
 }
 /// All terminal-error variants raised by the `comment-free` binary.
@@ -260,6 +302,253 @@ fn create_sibling_temp(path: &Path, dir: &Path) -> Result<(fs::File, TempFileGua
     )))
 }
 const TEMP_NAME_ATTEMPTS: u32 = 1024;
+fn push_json_string(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                write!(out, "\\u{:04x}", c as u32).expect("Write for String never fails");
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+fn push_text(out: &mut String, key: &str, value: &str) {
+    push_json_string(out, key);
+    out.push(':');
+    push_json_string(out, value);
+}
+fn push_number(out: &mut String, key: &str, value: u32) {
+    push_json_string(out, key);
+    write!(out, ":{value}").expect("Write for String never fails");
+}
+fn push_count(out: &mut String, key: &str, value: usize) {
+    push_number(out, key, u32::try_from(value).unwrap_or(u32::MAX));
+}
+fn open_record(kind: &str, version: u32) -> String {
+    let mut out = String::from("{");
+    push_text(&mut out, "record", kind);
+    out.push(',');
+    push_number(&mut out, "v", version);
+    out
+}
+/// The `doc_lint_finding` record naming one item over budget.
+///
+/// Returns a single JSON Lines record without its terminating newline.
+/// `path` is rendered with [`Path::display`], so a path that is not
+/// valid UTF-8 is reported lossily; every other byte, including tabs
+/// and newlines in a path or an item label, round-trips as a JSON
+/// escape.
+#[must_use]
+pub fn doc_lint_finding_record(
+    kind: DocLintKind,
+    path: &Path,
+    line: usize,
+    item: &str,
+    words: usize,
+    budget: usize,
+    fail_closed: bool,
+) -> String {
+    let mut out = open_record("doc_lint_finding", DOC_LINT_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "outcome", DocLintOutcome::Finding.as_str());
+    out.push(',');
+    push_hint_body(&mut out, kind, path, line, item, words, budget);
+    out.push(',');
+    push_json_string(&mut out, "fail_closed");
+    write!(out, ":{fail_closed}").expect("Write for String never fails");
+    out.push('}');
+    out
+}
+fn push_hint_body(
+    out: &mut String,
+    kind: DocLintKind,
+    path: &Path,
+    line: usize,
+    item: &str,
+    words: usize,
+    budget: usize,
+) {
+    push_text(out, "kind", kind.as_str());
+    out.push(',');
+    push_text(out, "path", &path.display().to_string());
+    out.push(',');
+    push_count(out, "line", line);
+    out.push(',');
+    push_text(out, "item", item);
+    out.push(',');
+    push_count(out, "words", words);
+    out.push(',');
+    push_count(out, "budget", budget);
+}
+/// The `doc_lint_header` record naming the doctrine once per kind.
+#[must_use]
+pub fn doc_lint_header_record(kind: DocLintKind) -> String {
+    let mut out = open_record("doc_lint_header", DOC_LINT_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "kind", kind.as_str());
+    out.push(',');
+    push_text(&mut out, "doctrine", DOC_LINT_DOCTRINE_MSG);
+    out.push('}');
+    out
+}
+/// The `doc_lint_hint` record carrying one finding's site coordinates.
+#[must_use]
+pub fn doc_lint_hint_record(
+    kind: DocLintKind,
+    path: &Path,
+    line: usize,
+    item: &str,
+    words: usize,
+    budget: usize,
+) -> String {
+    let mut out = open_record("doc_lint_hint", DOC_LINT_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "outcome", DocLintOutcome::Finding.as_str());
+    out.push(',');
+    push_hint_body(&mut out, kind, path, line, item, words, budget);
+    out.push('}');
+    out
+}
+/// The `doc_lint_truncated` record counting findings past the hint cap.
+#[must_use]
+pub fn doc_lint_truncated_record(kind: DocLintKind, remaining: usize) -> String {
+    let mut out = open_record("doc_lint_truncated", DOC_LINT_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "kind", kind.as_str());
+    out.push(',');
+    push_count(&mut out, "remaining", remaining);
+    out.push('}');
+    out
+}
+/// The `rewrite_summary` record aggregating a run's rewrite counters.
+#[must_use]
+pub fn rewrite_summary_record(mode: RewriteMode, counts: &RewriteCounts) -> String {
+    let mut out = open_record("rewrite_summary", REWRITE_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "mode", mode.as_str());
+    out.push(',');
+    push_number(&mut out, "comments_removed", counts.comments_removed);
+    out.push(',');
+    push_number(&mut out, "inline_trimmed", counts.inline_trimmed);
+    out.push(',');
+    push_number(
+        &mut out,
+        "blank_lines_collapsed",
+        counts.blank_lines_collapsed,
+    );
+    out.push(',');
+    push_number(&mut out, "doc_links_rewritten", counts.doc_links_rewritten);
+    out.push('}');
+    out
+}
+/// Which per-file failure a `run_error` record reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RunErrorKind {
+    /// Directory traversal could not read an entry.
+    Walk,
+    /// The file could not be read or written.
+    Io,
+    /// The file could not be parsed as Rust.
+    Parse,
+    /// The destination changed between read and write, so it was left as found.
+    Conflict,
+}
+impl RunErrorKind {
+    /// The `kind` field value carried by emitted records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Walk => "walk",
+            Self::Io => "io",
+            Self::Parse => "parse",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+/// The `run_error` record naming one failed path and its cause.
+///
+/// `path` is rendered with [`Path::display`], so a path that is not
+/// valid UTF-8 is reported lossily; every other byte, including tabs
+/// and newlines, round-trips as a JSON escape.
+#[must_use]
+pub fn run_error_record(kind: RunErrorKind, path: &Path, message: &str) -> String {
+    let mut out = open_record("run_error", DIAGNOSTIC_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "kind", kind.as_str());
+    out.push(',');
+    push_text(&mut out, "path", &path.display().to_string());
+    out.push(',');
+    push_text(&mut out, "message", message);
+    out.push('}');
+    out
+}
+/// The `doc_file_warning` record naming one documentation file the
+/// rewrite passes will not touch.
+#[must_use]
+pub fn doc_file_warning_record(path: &Path) -> String {
+    let mut out = open_record("doc_file_warning", DIAGNOSTIC_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "path", &path.display().to_string());
+    out.push('}');
+    out
+}
+/// The `rewrite_file` record naming one file the rewrite passes changed.
+///
+/// `mode` distinguishes a file written on disk from one that only would
+/// have been written under `--dry-run`.
+#[must_use]
+pub fn rewrite_file_record(mode: RewriteMode, path: &Path) -> String {
+    let mut out = open_record("rewrite_file", DIAGNOSTIC_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "mode", mode.as_str());
+    out.push(',');
+    push_text(&mut out, "path", &path.display().to_string());
+    out.push('}');
+    out
+}
+/// The `strip_summary` record closing a `--rewrite` run.
+#[must_use]
+pub fn strip_summary_record(
+    mode: RewriteMode,
+    rewritten: u32,
+    unchanged: u32,
+    errors: u32,
+) -> String {
+    let mut out = open_record("strip_summary", DIAGNOSTIC_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "mode", mode.as_str());
+    out.push(',');
+    push_number(&mut out, "rewritten", rewritten);
+    out.push(',');
+    push_number(&mut out, "unchanged", unchanged);
+    out.push(',');
+    push_number(&mut out, "errors", errors);
+    out.push('}');
+    out
+}
+/// The `lint_summary` record closing a default-mode lint run.
+#[must_use]
+pub fn lint_summary_record(files: u32, findings: u32, errors: u32) -> String {
+    let mut out = open_record("lint_summary", DIAGNOSTIC_RECORD_VERSION);
+    out.push(',');
+    push_number(&mut out, "files", files);
+    out.push(',');
+    push_number(&mut out, "findings", findings);
+    out.push(',');
+    push_number(&mut out, "errors", errors);
+    out.push('}');
+    out
+}
 /// Knobs [`process_file`] reads. `main.rs`'s clap `Options` is intentionally a
 /// superset; this trims the surface to what the pure logic actually needs.
 pub struct ProcessOptions {
@@ -274,10 +563,7 @@ pub struct ProcessOptions {
 ///
 /// - [`FileOutcome::Rewritten`] — content changed (unified diff in
 ///   `dry_run` mode, `None` otherwise).
-/// - [`FileOutcome::Unchanged`] — no bytes changed; `counts` still
-///   reports preserved idioms (e.g. `safety_preserved`) so a file
-///   whose only comment is `// SAFETY:` isn't invisible to the
-///   rewrite summary.
+/// - [`FileOutcome::Unchanged`] — no bytes changed.
 /// - [`FileOutcome::ParseError`] — syn parse for the doc-link pass
 ///   failed; file left untouched on disk.
 /// - [`FileOutcome::IoError`] — any I/O failure.
@@ -294,9 +580,8 @@ pub struct ProcessOptions {
 /// while a panic unwinds; an abort or a failing removal can still leave
 /// it behind.
 ///
-/// Stripped: ordinary `//` line and `/* */` block comments. Preserved:
-/// doc comments (`///`, `//!`, `/** */`, `/*! */`), `// SAFETY:` /
-/// `// SAFETY` lines, and `AUTO-TRAIT-POLICY-{BEGIN,END}` markers.
+/// Stripped: every ordinary `//` line and `/* */` block comment.
+/// Preserved: doc comments (`///`, `//!`, `/** */`, `/*! */`).
 #[must_use]
 pub fn process_file(path: &Path, opts: &ProcessOptions) -> FileOutcome {
     let original = match fs::read_to_string(path) {
@@ -335,31 +620,6 @@ pub fn process_file(path: &Path, opts: &ProcessOptions) -> FileOutcome {
         }
     }
 }
-/// Substring tokens identifying line comments that must be preserved
-/// when stripping non-doc comments. Block comments are NEVER on the
-/// preserved list — these idioms are line-comment-shaped by convention
-/// (`// SAFETY:`, the `assert_auto_traits!` sentinel markers).
-///
-/// Conservatively matched as substrings (not full-line) so leading
-/// whitespace and trailing prose around the token still preserve the
-/// line. `// SAFETY:` is included for forward-compatibility with
-/// `unsafe` code (ADR-0014 forbids workspace-authored `unsafe` today;
-/// the idiom is preserved doctrinally for the future).
-const PRESERVED_LINE_COMMENT_TOKENS: &[&str] = &[
-    "AUTO-TRAIT-POLICY-BEGIN",
-    "AUTO-TRAIT-POLICY-END",
-    "SAFETY:",
-    "SAFETY ",
-];
-/// True iff `line_comment_body` (including its `//` prefix) matches one of
-/// the preserved line-comment substrings. Block-comment bodies are never
-/// preserved — see [`PRESERVED_LINE_COMMENT_TOKENS`].
-#[must_use]
-pub fn line_comment_is_preserved(line_comment_body: &str) -> bool {
-    PRESERVED_LINE_COMMENT_TOKENS
-        .iter()
-        .any(|tok| line_comment_body.contains(tok))
-}
 /// Strip non-doc line and block comments from `src` using
 /// [`ra_ap_rustc_lexer`], preserving every other byte verbatim. Thin
 /// wrapper over [`strip_line_comments_with_counts`] discarding the
@@ -373,11 +633,10 @@ pub fn strip_line_comments(src: &str) -> String {
 /// tally of the strip pass.
 ///
 /// Drops a token iff it is a `LineComment` or `BlockComment` with
-/// `doc_style: None` and the body doesn't match
-/// [`line_comment_is_preserved`]; doc comments and every other token
-/// are preserved unchanged. String-literal interiors are structurally
-/// unreachable by this pass, so marker-looking text inside a string
-/// round-trips byte-identical.
+/// `doc_style: None`; doc comments and every other token are preserved
+/// unchanged. String-literal interiors are structurally unreachable by
+/// this pass, so comment-looking text inside a string round-trips
+/// byte-identical.
 ///
 /// A solo-line drop collapses its trailing blank-line scar; an inline
 /// (post-code) drop trims the preceding horizontal whitespace instead.
@@ -402,28 +661,14 @@ pub fn strip_line_comments_with_counts(src: &str) -> (String, RewriteCounts) {
             token.kind,
             TokenKind::LineComment { .. } | TokenKind::BlockComment { .. }
         );
-        let (drop, preserved_kind) = match token.kind {
-            TokenKind::LineComment { doc_style: None } => {
-                if line_comment_is_preserved(text) {
-                    (false, classify_preserved_token(text))
-                } else {
-                    (true, PreservedKind::None)
+        let drop = matches!(
+            token.kind,
+            TokenKind::LineComment { doc_style: None }
+                | TokenKind::BlockComment {
+                    doc_style: None,
+                    ..
                 }
-            }
-            TokenKind::BlockComment {
-                doc_style: None, ..
-            } => (true, PreservedKind::None),
-            _ => (false, PreservedKind::None),
-        };
-        match preserved_kind {
-            PreservedKind::None => {}
-            PreservedKind::Safety => {
-                counts.safety_preserved = counts.safety_preserved.saturating_add(1);
-            }
-            PreservedKind::AutoTrait => {
-                counts.auto_trait_preserved = counts.auto_trait_preserved.saturating_add(1);
-            }
-        }
+        );
         if drop {
             let before_comment = &src[..end - text.len()];
             let was_line_alone = line_was_blank_before(before_comment);
@@ -473,30 +718,6 @@ pub fn strip_line_comments_with_counts(src: &str) -> (String, RewriteCounts) {
         counts.blank_lines_collapsed = counts.blank_lines_collapsed.saturating_add(1);
     }
     (out, counts)
-}
-/// Tag returned by [`classify_preserved_token`] identifying which
-/// preserved-marker family a kept `//` comment belongs to. Used by
-/// [`strip_line_comments_with_counts`] to increment the corresponding
-/// `RewriteCounts` field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreservedKind {
-    None,
-    Safety,
-    AutoTrait,
-}
-/// Classify a preserved line-comment by the substring token that kept
-/// it alive. `AUTO-TRAIT-POLICY-{BEGIN,END}` markers take precedence
-/// over the `SAFETY` family for counting purposes — a single line
-/// containing both substrings is rare in practice and the auto-trait
-/// guarantee is the stronger signal.
-fn classify_preserved_token(text: &str) -> PreservedKind {
-    if text.contains("AUTO-TRAIT-POLICY-BEGIN") || text.contains("AUTO-TRAIT-POLICY-END") {
-        PreservedKind::AutoTrait
-    } else if text.contains("SAFETY:") || text.contains("SAFETY ") {
-        PreservedKind::Safety
-    } else {
-        PreservedKind::None
-    }
 }
 /// State captured while inside a contiguous run of solo-line non-doc
 /// comment drops. `blanks_above` is the count of blank lines that
@@ -918,14 +1139,44 @@ fn collect_cfg_attr_doc_splices(attrs: &[Attribute], original: &str, out: &mut V
         }
     }
 }
+fn push_single_line(out: &mut String, path: &Path) {
+    push_single_line_str(out, &path.display().to_string());
+}
+fn push_single_line_str(out: &mut String, text: &str) {
+    for c in text.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                write!(out, "\\u{:04x}", c as u32).expect("Write for String never fails");
+            }
+            c => out.push(c),
+        }
+    }
+}
+/// Collapse `text` to a single line for a human-facing stream.
+///
+/// Escapes LF, CR, TAB, every other C0 code point and DEL, so rendered
+/// prose can never introduce a column-zero line a record consumer would
+/// mistake for a JSON Lines record.
+#[must_use]
+pub fn single_line(text: &str) -> String {
+    let mut out = String::new();
+    push_single_line_str(&mut out, text);
+    out
+}
 /// Render a unified diff between `original` and `rewritten` for `path`.
 #[must_use]
 pub fn unified_diff(path: &Path, original: &str, rewritten: &str, context: usize) -> String {
-    let display = path.display().to_string();
     let diff = TextDiff::from_lines(original, rewritten);
     let mut out = String::new();
-    writeln!(out, "--- a/{display}").expect("Write for String never fails");
-    writeln!(out, "+++ b/{display}").expect("Write for String never fails");
+    out.push_str("--- a/");
+    push_single_line(&mut out, path);
+    out.push('\n');
+    out.push_str("+++ b/");
+    push_single_line(&mut out, path);
+    out.push('\n');
     for hunk in diff.unified_diff().context_radius(context).iter_hunks() {
         writeln!(out, "{}", hunk.header()).expect("Write for String never fails");
         for change in hunk.iter_changes() {
@@ -1005,8 +1256,8 @@ pub const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "bu
 ///
 /// The `docs/`/`doc/` rule is **scoped to the first relative component
 /// under `root`**, so `src/docs/mod.rs` or `crates/foo/doc/inner.rs` do
-/// NOT match. This narrows the strip-mode `DOC_WARN` noise to genuine
-/// top-level documentation directories.
+/// NOT match. This narrows the strip-mode `doc_file_warning` noise to
+/// genuine top-level documentation directories.
 #[must_use]
 pub fn is_doc_path(path: &Path, root: &Path) -> bool {
     if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
@@ -1049,12 +1300,10 @@ const BARE_DOC_STEMS: &[&str] = &[
 ];
 /// Doc-comment word budget for the [`doc_lint_file`] linter.
 ///
-/// The doctrine attached to every finding ([`DOC_LINT_DOCTRINE_MSG`])
-/// allows 0-3 fenced code examples per doc comment; examples are
-/// defined mechanically as fenced code blocks (` ``` ` or `~~~`) and
-/// do not count toward the prose word budget. The linter has no
-/// semantic notion of an "example" — fence delimiters are the only
-/// signal.
+/// Examples are defined mechanically as fenced code blocks (` ``` ` or
+/// `~~~`) and do not count toward the prose word budget. The linter has
+/// no semantic notion of an "example" — fence delimiters are the only
+/// signal — and enforces no limit on how many a doc comment may carry.
 #[derive(Debug, Clone, Copy)]
 pub struct DocBudget {
     /// Maximum words allowed per doc comment (prose only; fenced code,
@@ -1748,15 +1997,15 @@ mod process_file_tests {
         }
     }
     #[test]
-    fn safety_only_file_is_unchanged_but_counts_safety_preserved() {
+    fn safety_only_file_is_rewritten_and_counts_the_comment_removed() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("a.rs");
         fs::write(&path, "// SAFETY: pointer is valid\nfn f() {}\n").unwrap();
         match process_file(&path, &opts()) {
-            FileOutcome::Unchanged { counts } => {
-                assert_eq!(counts.safety_preserved, 1);
+            FileOutcome::Rewritten { counts, .. } => {
+                assert_eq!(counts.comments_removed, 1);
             }
-            other => panic!("expected Unchanged for SAFETY-only file, got {other:?}"),
+            other => panic!("expected Rewritten for SAFETY-only file, got {other:?}"),
         }
     }
     #[test]
@@ -1779,14 +2028,19 @@ mod process_file_tests {
         assert_eq!(strip_line_comments(src), src);
     }
     #[test]
-    fn strip_line_comments_keeps_safety_idiom() {
+    fn strip_line_comments_drops_safety_idiom() {
         let src = "// SAFETY: hand-written invariant\nfn f() {}\n";
-        assert_eq!(strip_line_comments(src), src);
+        assert_eq!(strip_line_comments(src), "fn f() {}\n");
     }
     #[test]
-    fn strip_line_comments_keeps_auto_trait_policy_markers() {
+    fn strip_line_comments_drops_prose_merely_containing_safety() {
+        let src = "// this code is SAFETY critical, review carefully\nfn f() {}\n";
+        assert_eq!(strip_line_comments(src), "fn f() {}\n");
+    }
+    #[test]
+    fn strip_line_comments_drops_auto_trait_policy_markers() {
         let src = "// AUTO-TRAIT-POLICY-BEGIN\nfn f() {}\n// AUTO-TRAIT-POLICY-END\n";
-        assert_eq!(strip_line_comments(src), src);
+        assert_eq!(strip_line_comments(src), "fn f() {}\n");
     }
     #[test]
     fn strip_line_comments_preserves_string_literals_with_marker_text() {
@@ -1845,9 +2099,9 @@ mod process_file_tests {
         assert_eq!(strip_line_comments(src), src);
     }
     #[test]
-    fn strip_line_comments_inline_trim_does_not_touch_safety_line() {
+    fn strip_line_comments_inline_trim_removes_trailing_safety_line() {
         let src = "let x = 1; // SAFETY: invariant\nlet y = 2;\n";
-        assert_eq!(strip_line_comments(src), src);
+        assert_eq!(strip_line_comments(src), "let x = 1;\nlet y = 2;\n");
     }
     #[test]
     fn strip_line_comments_inline_trim_does_not_touch_doc_comment() {
@@ -1970,18 +2224,16 @@ mod process_file_tests {
         assert_eq!(counts.blank_lines_collapsed, 0);
     }
     #[test]
-    fn strip_line_comments_with_counts_counts_safety_preserved() {
+    fn strip_line_comments_with_counts_counts_safety_line_as_removed() {
         let (_, counts) =
             super::strip_line_comments_with_counts("// SAFETY: invariant\nfn f() {}\n");
-        assert_eq!(counts.comments_removed, 0);
-        assert_eq!(counts.safety_preserved, 1);
+        assert_eq!(counts.comments_removed, 1);
     }
     #[test]
-    fn strip_line_comments_with_counts_counts_auto_trait_preserved() {
+    fn strip_line_comments_with_counts_counts_auto_trait_markers_as_removed() {
         let src = "// AUTO-TRAIT-POLICY-BEGIN\nfn f() {}\n// AUTO-TRAIT-POLICY-END\n";
         let (_, counts) = super::strip_line_comments_with_counts(src);
-        assert_eq!(counts.comments_removed, 0);
-        assert_eq!(counts.auto_trait_preserved, 2);
+        assert_eq!(counts.comments_removed, 2);
     }
     #[test]
     fn strip_line_comments_thin_wrapper_matches_full() {
@@ -2720,5 +2972,142 @@ mod doc_path_tests {
             root
         ));
         assert!(!is_doc_path(Path::new("/proj/src/doc/util.rs"), root));
+    }
+}
+#[cfg(test)]
+mod record_tests {
+    use super::{
+        DOC_LINT_RECORD_VERSION, DocLintKind, REWRITE_RECORD_VERSION, RewriteCounts, RewriteMode,
+        doc_lint_finding_record, doc_lint_header_record, doc_lint_hint_record,
+        doc_lint_truncated_record, rewrite_summary_record, unified_diff,
+    };
+    use std::path::Path;
+    fn hint(path: &str, item: &str) -> String {
+        doc_lint_hint_record(DocLintKind::OverlongDoc, Path::new(path), 12, item, 100, 80)
+    }
+    #[test]
+    fn hint_record_carries_record_name_version_and_outcome() {
+        let line = hint("src/lib.rs", "fn f");
+        assert!(
+            line.starts_with("{\"record\":\"doc_lint_hint\",\"v\":2,"),
+            "{line}"
+        );
+        assert!(line.contains("\"outcome\":\"finding\""), "{line}");
+        assert!(line.contains("\"kind\":\"overlong_doc\""), "{line}");
+        assert!(line.contains("\"path\":\"src/lib.rs\""), "{line}");
+        assert!(line.contains("\"line\":12"), "{line}");
+        assert!(line.contains("\"words\":100"), "{line}");
+        assert!(line.contains("\"budget\":80"), "{line}");
+    }
+    #[test]
+    fn diff_header_renders_a_hostile_path_as_a_single_line() {
+        let path = Path::new("src/we\nird\u{1}.rs");
+        let diff = unified_diff(path, "a\n", "b\n", 1);
+        let header: Vec<&str> = diff
+            .lines()
+            .filter(|l| l.starts_with("--- ") || l.starts_with("+++ "))
+            .collect();
+        assert_eq!(header.len(), 2, "exactly two header lines: {diff}");
+        for line in header {
+            assert!(
+                line.ends_with("src/we\\nird\\u0001.rs"),
+                "the header must escape control characters in place: {line}"
+            );
+        }
+        for line in diff.lines() {
+            assert!(
+                !line.starts_with('{'),
+                "no diff line may be mistaken for a record: {line}"
+            );
+        }
+    }
+    #[test]
+    fn record_is_a_single_line_even_when_the_path_contains_a_newline() {
+        let line = hint("src/we\nird.rs", "fn f");
+        assert!(
+            !line.contains('\n'),
+            "record must not contain a raw newline: {line}"
+        );
+        assert!(line.contains("src/we\\nird.rs"), "{line}");
+    }
+    #[test]
+    fn record_escapes_tabs_in_paths_and_item_labels() {
+        let line = hint("src/a\tb.rs", "fn we\tird");
+        assert!(
+            !line.contains('\t'),
+            "record must not contain a raw tab: {line}"
+        );
+        assert!(line.contains("src/a\\tb.rs"), "{line}");
+        assert!(line.contains("fn we\\tird"), "{line}");
+    }
+    #[test]
+    fn record_escapes_quotes_backslashes_and_control_characters() {
+        let line = hint("src/\"q\\b.rs", "fn \u{1}ctl");
+        assert!(line.contains("src/\\\"q\\\\b.rs"), "{line}");
+        assert!(line.contains("fn \\u0001ctl"), "{line}");
+    }
+    #[test]
+    fn finding_record_carries_fail_closed_as_a_boolean() {
+        let base = |fc| {
+            doc_lint_finding_record(
+                DocLintKind::OverlongDoc,
+                Path::new("src/lib.rs"),
+                3,
+                "fn f",
+                9,
+                8,
+                fc,
+            )
+        };
+        assert!(base(true).contains("\"fail_closed\":true"));
+        assert!(base(false).contains("\"fail_closed\":false"));
+    }
+    #[test]
+    fn header_record_carries_the_doctrine_without_a_numeric_example_promise() {
+        let line = doc_lint_header_record(DocLintKind::OverlongDoc);
+        assert!(line.contains("\"record\":\"doc_lint_header\""), "{line}");
+        assert!(
+            line.contains("Rust docs must contain a concise summary"),
+            "{line}"
+        );
+        assert!(
+            !line.contains("0-3"),
+            "the unenforced 0-3 example promise must not appear in machine output: {line}"
+        );
+    }
+    #[test]
+    fn truncated_record_carries_the_residual_count() {
+        let line = doc_lint_truncated_record(DocLintKind::OverlongDoc, 7);
+        assert!(line.contains("\"record\":\"doc_lint_truncated\""), "{line}");
+        assert!(line.contains("\"remaining\":7"), "{line}");
+    }
+    #[test]
+    fn rewrite_summary_record_has_no_preservation_counters() {
+        let counts = RewriteCounts {
+            comments_removed: 3,
+            inline_trimmed: 1,
+            blank_lines_collapsed: 2,
+            doc_links_rewritten: 4,
+            ..RewriteCounts::default()
+        };
+        let line = rewrite_summary_record(RewriteMode::Write, &counts);
+        assert!(
+            line.starts_with("{\"record\":\"rewrite_summary\",\"v\":2,"),
+            "{line}"
+        );
+        assert!(line.contains("\"mode\":\"write\""), "{line}");
+        assert!(line.contains("\"comments_removed\":3"), "{line}");
+        assert!(!line.contains("safety_preserved"), "{line}");
+        assert!(!line.contains("auto_trait_preserved"), "{line}");
+    }
+    #[test]
+    fn rewrite_summary_record_names_dry_run_mode() {
+        let line = rewrite_summary_record(RewriteMode::DryRun, &RewriteCounts::default());
+        assert!(line.contains("\"mode\":\"dry-run\""), "{line}");
+    }
+    #[test]
+    fn both_record_versions_are_two() {
+        assert_eq!(DOC_LINT_RECORD_VERSION, 2);
+        assert_eq!(REWRITE_RECORD_VERSION, 2);
     }
 }

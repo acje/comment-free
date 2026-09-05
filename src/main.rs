@@ -2,9 +2,11 @@
 #![warn(clippy::missing_const_for_fn)]
 use clap::Parser;
 use comment_free::{
-    CommentFreeError, DOC_LINT_DOCTRINE_MSG, DOC_LINT_RECORD_VERSION, DocBudget, FileOutcome,
-    ProcessOptions, REWRITE_RECORD_VERSION, RewriteCounts, SKIP_DIRS, WalkError, doc_lint_file,
-    process_file, scan_doc_files,
+    CommentFreeError, DocBudget, DocLintKind, FileOutcome, ProcessOptions, RewriteCounts,
+    RewriteMode, RunErrorKind, SKIP_DIRS, WalkError, doc_file_warning_record, doc_lint_file,
+    doc_lint_finding_record, doc_lint_header_record, doc_lint_hint_record,
+    doc_lint_truncated_record, lint_summary_record, process_file, rewrite_file_record,
+    rewrite_summary_record, run_error_record, scan_doc_files, strip_summary_record,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,25 +17,33 @@ use walkdir::WalkDir;
     version,
     about = "Doc-comment linter and byte-preserving rustdoc-link rewriter for Rust crates. \
              Default mode lints doc-comment word budget. \
-             `--rewrite` strips non-doc `//` and `/* */` comments via the rustc lexer (preserving doc comments, AUTO-TRAIT-POLICY markers, and `// SAFETY:` lines) and canonicalises Rust intra-doc-link idioms in doc-comment payloads. Both passes are byte-preserving outside their targets.",
+             `--rewrite` strips every non-doc `//` and `/* */` comment via the rustc lexer (doc comments are preserved) and canonicalises Rust intra-doc-link idioms in doc-comment payloads. Both passes are byte-preserving outside their targets.",
     long_about = "Default mode is a read-only doc-comment budget linter: walks ROOT for .rs files \
                   and reports doc comments whose prose word count exceeds --doc-max-words. \
-                  Fenced code blocks (` ``` ` or `~~~`) are excluded from the count; the \
-                  doctrine allows 0-3 such fenced examples per doc comment and they do not \
-                  consume the word budget. Examples are detected mechanically by fence \
-                  delimiters only — there is no semantic example detection. Doc comments \
-                  are NEVER deleted by this tool.\n\
+                  Fenced code blocks (` ``` ` or `~~~`) are excluded from the count and do \
+                  not consume the word budget. Examples are detected mechanically by fence \
+                  delimiters only — there is no semantic example detection, and no limit on \
+                  the number of fenced blocks is enforced. Doc comments are NEVER deleted by \
+                  this tool.\n\
                   \n\
-                  Lint output is structured for LLM-agent consumption. The full record\n\
-                  grammar is published as `comment_free::DOC_LINT_RECORD_GRAMMAR` and the\n\
-                  record-format version as `comment_free::DOC_LINT_RECORD_VERSION`.\n\
+                  Lint findings, run diagnostics and summaries are all emitted as JSON\n\
+                  Lines, one record per line, for LLM-agent consumption. The authoritative\n\
+                  grammar and the compatibility rules live in docs/record-format.md;\n\
+                  one-line templates are published as\n\
+                  `comment_free::DOC_LINT_RECORD_GRAMMAR`,\n\
+                  `comment_free::REWRITE_RECORD_GRAMMAR` and\n\
+                  `comment_free::DIAGNOSTIC_RECORD_GRAMMAR`, with the record-format versions\n\
+                  as the matching `*_RECORD_VERSION` constants.\n\
                   \n\
-                    DOC_LINT          one per finding, full path:line + item + words + budget\n\
-                    DOC_LINT_HEADER   one per finding kind (kind=overlong_doc), names the doctrine once\n\
-                    DOC_LINT_HINT     up to 50 per kind, tab-separated structured fields:\n\
-                                        path:line, item=…, words=N, budget=M, kind=overlong_doc, v=1\n\
-                                        sorted by overshoot (words - budget) descending\n\
-                    DOC_LINT_TRUNCATED tail summary when a kind has > 50 findings\n\
+                    doc_lint_finding   one per finding: path, line, item, words, budget\n\
+                    doc_lint_header    one per finding kind, names the doctrine once\n\
+                    doc_lint_hint      up to 50 per kind, sorted by overshoot descending\n\
+                    doc_lint_truncated tail summary when a kind has > 50 findings\n\
+                    run_error          one per failed path: kind, path, message\n\
+                    doc_file_warning   one per documentation file left untouched\n\
+                    rewrite_file       one per changed file: mode, path\n\
+                    strip_summary      one per --rewrite run\n\
+                    lint_summary       one per lint run\n\
                   \n\
                   Rewrite mode (`--rewrite`):\n\
                   \n\
@@ -42,11 +52,10 @@ use walkdir::WalkDir;
                     1. Doc-link idiom canonicalisation: mutates ONLY `///`, `//!`, \
                        `#[doc = \"...\"]`, `#![doc = \"...\"]`, and `#[cfg_attr(_, doc = \"...\")]` \
                        payload text to canonical rustdoc link form ([Type](Type) -> [`Type`], etc.).\n\
-                    2. Non-doc comment strip: removes `//` line comments and `/* */` block \
-                       comments via the rustc lexer. Doc comments are kept. `// SAFETY:` lines \
-                       and lines containing `AUTO-TRAIT-POLICY-BEGIN` / `AUTO-TRAIT-POLICY-END` \
-                       markers are also kept. String literals are structurally unreachable by \
-                       the strip pass — marker-looking text inside any string round-trips byte-identical.\n\
+                    2. Non-doc comment strip: removes every `//` line comment and `/* */` \
+                       block comment via the rustc lexer. Doc comments are kept; nothing else \
+                       is. String literals are structurally unreachable by the strip pass — \
+                       comment-looking text inside any string round-trips byte-identical.\n\
                   \n\
                   `--dry-run` is always safe; it emits unified diffs to stdout without writing files.\n\
                   \n\
@@ -59,20 +68,23 @@ use walkdir::WalkDir;
                     1  catastrophic / unmapped IO error\n\
                     2  invalid CLI arguments (clap rejection)\n\
                     4  doc-lint findings observed (default mode)\n\
-                    5  per-file parse/IO errors, or directory-traversal errors\n\
-                       (WALK_ERROR), observed during processing (both modes)\n\
+                    5  per-file parse/IO errors, or directory-traversal errors,\n\
+                       observed during processing (both modes); each is reported\n\
+                       as a `run_error` record naming its kind\n\
                   \n\
-                  Output streams: findings (DOC_LINT, REWRITE, WOULD_REWRITE, diffs) on \
-                  stdout; metadata (SUMMARY, DOC_WARN, errors) on stderr."
+                  Output streams: findings (doc_lint_* records, rewrite_file records, \
+                  diffs) on stdout; metadata (strip_summary, lint_summary, rewrite_summary, \
+                  doc_file_warning, run_error) on stderr. Every line except the --dry-run \
+                  unified diff body is a JSON Lines record; the diff body is human-facing \
+                  plain text and is never machine-parsed."
 )]
 struct Options {
     #[arg(default_value = ".", value_name = "ROOT")]
     root: PathBuf,
     /// Run the byte-preserving rewrite passes over every `.rs` file
     /// under ROOT: canonicalise rustdoc-link idioms in doc payloads,
-    /// then strip non-doc `//` and `/* */` comments via the rustc
-    /// lexer. Doc comments, `// SAFETY:` lines, and AUTO-TRAIT-POLICY
-    /// markers are preserved.
+    /// then strip every non-doc `//` and `/* */` comment via the rustc
+    /// lexer. Doc comments are preserved; nothing else is.
     #[arg(long)]
     rewrite: bool,
     /// Preview the rewrite as a unified diff without modifying files.
@@ -86,9 +98,8 @@ struct Options {
     #[arg(long, default_value_t = 3, value_name = "N", requires = "rewrite")]
     context: usize,
     /// Word budget for doc-comment prose. Fenced code blocks (` ``` `
-    /// or `~~~`) are excluded from the count; the doctrine allows 0-3
-    /// such fenced examples per doc comment and they do not consume
-    /// the budget.
+    /// or `~~~`) are excluded from the count and do not consume the
+    /// budget.
     #[arg(long, default_value_t = 80, value_name = "N")]
     doc_max_words: usize,
     /// DEPRECATED alias for plain `--rewrite`. Retained for one
@@ -97,20 +108,55 @@ struct Options {
     #[arg(long, requires = "rewrite")]
     rustdoc_link_idioms: bool,
 }
+enum ArgvRejection {
+    Renderable(Box<clap::Error>),
+    ControlBearing,
+}
+
+fn argv_has_control_bytes() -> bool {
+    std::env::args_os().any(|a| a.as_encoded_bytes().iter().any(|&b| b < 0x20 || b == 0x7f))
+}
+
+fn parse_options() -> Result<Options, ArgvRejection> {
+    Options::try_parse().map_err(|e| {
+        if argv_has_control_bytes() {
+            ArgvRejection::ControlBearing
+        } else {
+            ArgvRejection::Renderable(Box::new(e))
+        }
+    })
+}
+
+fn report_argv_rejection(rejection: &ArgvRejection) -> ExitCode {
+    match rejection {
+        ArgvRejection::Renderable(e) => {
+            let _ = e.print();
+            if e.exit_code() == 0 {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(2)
+            }
+        }
+        ArgvRejection::ControlBearing => {
+            eprintln!(
+                "error: invalid arguments; an argument contains control characters and \
+                 is not reproduced here. Re-run with --help for usage."
+            );
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    let opts = Options::parse();
+    let opts = match parse_options() {
+        Ok(o) => o,
+        Err(rejection) => return report_argv_rejection(&rejection),
+    };
     match run(&opts) {
         Ok(0) => ExitCode::SUCCESS,
         Ok(_) => ExitCode::from(5),
         Err(e) => {
-            match &e {
-                CommentFreeError::NotADirectory => {
-                    eprintln!("error: {} is not a directory", opts.root.display());
-                }
-                other => {
-                    eprintln!("error: {other}");
-                }
-            }
+            eprintln!("error: {}", comment_free::single_line(&e.to_string()));
             ExitCode::from(&e)
         }
     }
@@ -194,22 +240,23 @@ fn run_strip(opts: &Options) -> u32 {
     let mut errors = 0u32;
     let doc_scan = scan_doc_files(&opts.root);
     for path in &doc_scan.files {
-        eprintln!("DOC_WARN\t{}", path.display());
+        eprintln!("{}", doc_file_warning_record(path));
     }
     for e in &doc_scan.errors {
         errors += 1;
-        eprintln!("WALK_ERROR\t{}\t{}", e.path.display(), e.source);
-    }
-    if !doc_scan.files.is_empty() {
         eprintln!(
-            "warning: {} documentation file(s) found under {}; they will NOT be modified",
-            doc_scan.files.len(),
-            opts.root.display()
+            "{}",
+            run_error_record(RunErrorKind::Walk, &e.path, &e.source.to_string())
         );
     }
     let process_opts = ProcessOptions {
         dry_run: opts.dry_run,
         context: opts.context,
+    };
+    let mode = if opts.dry_run {
+        RewriteMode::DryRun
+    } else {
+        RewriteMode::Write
     };
     let mut rewritten = 0u32;
     let mut unchanged = 0u32;
@@ -219,7 +266,10 @@ fn run_strip(opts: &Options) -> u32 {
             Ok(p) => p,
             Err(e) => {
                 errors += 1;
-                eprintln!("WALK_ERROR\t{}\t{}", e.path.display(), e.source);
+                eprintln!(
+                    "{}",
+                    run_error_record(RunErrorKind::Walk, &e.path, &e.source.to_string())
+                );
                 continue;
             }
         };
@@ -227,13 +277,9 @@ fn run_strip(opts: &Options) -> u32 {
             FileOutcome::Rewritten { diff, counts } => {
                 rewritten += 1;
                 counts_total += counts;
-                if opts.dry_run {
-                    println!("WOULD_REWRITE\t{}", path.display());
-                    if let Some(d) = diff {
-                        print!("{d}");
-                    }
-                } else {
-                    println!("REWRITE\t{}", path.display());
+                println!("{}", rewrite_file_record(mode, &path));
+                if let Some(d) = diff {
+                    print!("{d}");
                 }
             }
             FileOutcome::Unchanged { counts } => {
@@ -242,55 +288,31 @@ fn run_strip(opts: &Options) -> u32 {
             }
             FileOutcome::ParseError(msg) => {
                 errors += 1;
-                eprintln!("PARSE_ERROR\t{}\t{}", path.display(), msg);
+                eprintln!("{}", run_error_record(RunErrorKind::Parse, &path, &msg));
             }
             FileOutcome::IoError(msg) => {
                 errors += 1;
-                eprintln!("IO_ERROR\t{}\t{}", path.display(), msg);
+                eprintln!("{}", run_error_record(RunErrorKind::Io, &path, &msg));
             }
             FileOutcome::Conflict => {
                 errors += 1;
                 eprintln!(
-                    "CONFLICT_ERROR\t{}\tdestination changed since it was read",
-                    path.display()
+                    "{}",
+                    run_error_record(
+                        RunErrorKind::Conflict,
+                        &path,
+                        "destination changed since it was read"
+                    )
                 );
             }
         }
     }
-    let mode = if opts.dry_run { "dry-run" } else { "write" };
-    print_summary_strip(mode, rewritten, unchanged, errors);
-    print_rewrite_summary(mode, &counts_total);
+    eprintln!(
+        "{}",
+        strip_summary_record(mode, rewritten, unchanged, errors)
+    );
+    eprintln!("{}", rewrite_summary_record(mode, &counts_total));
     errors
-}
-/// Strip-mode summary emitter. Emits to stderr (consistent with the
-/// metadata-vs-data convention: findings/diffs/REWRITE lines are data on
-/// stdout; the summary is metadata about the run on stderr).
-fn print_summary_strip(mode: &str, rewritten: u32, unchanged: u32, errors: u32) {
-    eprintln!(
-        "SUMMARY\tmode={mode}\trewritten={rewritten}\tunchanged={unchanged}\terrors={errors}"
-    );
-}
-/// Structured per-counter summary emitter for rewrite mode. Additive
-/// to [`print_summary_strip`]: both lines are emitted on stderr. The
-/// record grammar is published as
-/// [`comment_free::REWRITE_RECORD_GRAMMAR`] and the format version as
-/// [`comment_free::REWRITE_RECORD_VERSION`].
-fn print_rewrite_summary(mode: &str, counts: &RewriteCounts) {
-    let v = REWRITE_RECORD_VERSION;
-    eprintln!(
-        "REWRITE_SUMMARY\tmode={mode}\tcomments_removed={cr}\tinline_trimmed={it}\tblank_lines_collapsed={blc}\tdoc_links_rewritten={dlr}\tsafety_preserved={sp}\tauto_trait_preserved={atp}\tv={v}",
-        cr = counts.comments_removed,
-        it = counts.inline_trimmed,
-        blc = counts.blank_lines_collapsed,
-        dlr = counts.doc_links_rewritten,
-        sp = counts.safety_preserved,
-        atp = counts.auto_trait_preserved,
-    );
-}
-/// Lint-mode summary emitter. Writes to stderr (consistent with metadata
-/// convention).
-fn print_summary_lint(files: u32, findings: u32, errors: u32) {
-    eprintln!("SUMMARY\tmode=lint\tfiles={files}\tfindings={findings}\terrors={errors}");
 }
 /// Cap on `DOC_LINT_HINT` records emitted per finding kind. Beyond this,
 /// the residual count is surfaced as a single `DOC_LINT_TRUNCATED` line.
@@ -310,7 +332,10 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
             Ok(p) => p,
             Err(e) => {
                 errors += 1;
-                eprintln!("WALK_ERROR\t{}\t{}", e.path.display(), e.source);
+                eprintln!(
+                    "{}",
+                    run_error_record(RunErrorKind::Walk, &e.path, &e.source.to_string())
+                );
                 continue;
             }
         };
@@ -319,7 +344,10 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
             Ok(s) => s,
             Err(e) => {
                 errors += 1;
-                eprintln!("IO_ERROR\t{}\t{e}", path.display());
+                eprintln!(
+                    "{}",
+                    run_error_record(RunErrorKind::Io, &path, &e.to_string())
+                );
                 continue;
             }
         };
@@ -327,7 +355,10 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
             Ok(f) => f,
             Err(e) => {
                 errors += 1;
-                eprintln!("PARSE_ERROR\t{}\t{e}", path.display());
+                eprintln!(
+                    "{}",
+                    run_error_record(RunErrorKind::Parse, &path, &e.to_string())
+                );
                 continue;
             }
         };
@@ -337,22 +368,24 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
     }
     let findings_total = u32::try_from(all_findings.len()).unwrap_or(u32::MAX);
     for (path, finding) in &all_findings {
-        let suffix = if finding.fail_closed {
-            "\tfail_closed=unbalanced_fence"
-        } else {
-            ""
-        };
         println!(
-            "DOC_LINT\t{}:{}\titem={}\twords={}\tbudget={}{suffix}",
-            path.display(),
-            finding.line,
-            finding.item_label,
-            finding.word_count,
-            finding.budget
+            "{}",
+            doc_lint_finding_record(
+                DocLintKind::OverlongDoc,
+                path,
+                finding.line,
+                &finding.item_label,
+                finding.word_count,
+                finding.budget,
+                finding.fail_closed,
+            )
         );
     }
     emit_doc_lint_hints(&all_findings);
-    print_summary_lint(files_scanned, findings_total, errors);
+    eprintln!(
+        "{}",
+        lint_summary_record(files_scanned, findings_total, errors)
+    );
     if errors > 0 {
         return Ok(errors);
     }
@@ -362,22 +395,16 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
     Ok(0)
 }
 
-/// Emit one `DOC_LINT_HEADER` per finding kind, up to
-/// [`DOC_LINT_HINT_CAP`] structured `DOC_LINT_HINT` records (sorted by
-/// `words - budget` descending), and a `DOC_LINT_TRUNCATED` summary line
-/// when the kind has more findings than the cap.
-///
-/// Replaces the per-finding `DOC_LINT_MSG` doctrine spam: the doctrine
-/// is named once on the header; hints carry only structured site
-/// coordinates so an LLM-agent consumer can ingest the worst N
-/// offenders without parsing prose.
+/// Emit one `doc_lint_header` record per finding kind, up to
+/// [`DOC_LINT_HINT_CAP`] `doc_lint_hint` records sorted by
+/// `words - budget` descending, and a `doc_lint_truncated` record when
+/// the kind has more findings than the cap.
 fn emit_doc_lint_hints(findings: &[(std::path::PathBuf, comment_free::DocFinding)]) {
     if findings.is_empty() {
         return;
     }
-    let kind = "overlong_doc";
-    let v = DOC_LINT_RECORD_VERSION;
-    println!("DOC_LINT_HEADER\tkind={kind}\tv={v}\tdoctrine={DOC_LINT_DOCTRINE_MSG}");
+    let kind = DocLintKind::OverlongDoc;
+    println!("{}", doc_lint_header_record(kind));
     let mut sorted: Vec<&(std::path::PathBuf, comment_free::DocFinding)> =
         findings.iter().collect();
     sorted.sort_by(|(_, a), (_, b)| {
@@ -388,16 +415,12 @@ fn emit_doc_lint_hints(findings: &[(std::path::PathBuf, comment_free::DocFinding
     let kept = sorted.iter().take(DOC_LINT_HINT_CAP);
     for (path, f) in kept {
         println!(
-            "DOC_LINT_HINT\t{}:{}\titem={}\twords={}\tbudget={}\tkind={kind}\tv={v}",
-            path.display(),
-            f.line,
-            f.item_label,
-            f.word_count,
-            f.budget
+            "{}",
+            doc_lint_hint_record(kind, path, f.line, &f.item_label, f.word_count, f.budget)
         );
     }
     if sorted.len() > DOC_LINT_HINT_CAP {
         let remaining = sorted.len() - DOC_LINT_HINT_CAP;
-        println!("DOC_LINT_TRUNCATED\tkind={kind}\tremaining={remaining}\tv={v}");
+        println!("{}", doc_lint_truncated_record(kind, remaining));
     }
 }

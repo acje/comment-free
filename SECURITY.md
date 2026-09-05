@@ -24,9 +24,9 @@ In scope:
 - input handling in the Rust source lexer/parser when run over untrusted
   source trees,
 - incorrect rewriting in `--rewrite` mode: comment-free edits files in
-  place, so a rewrite that deletes a doc comment, drops a `// SAFETY:`
-  line, or otherwise changes program semantics is a security-relevant
-  defect, not merely a correctness one.
+  place, so a rewrite that deletes a doc comment or otherwise changes
+  program semantics is a security-relevant defect, not merely a
+  correctness one.
 
 Out of scope:
 

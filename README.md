@@ -4,27 +4,32 @@
 structured, and intentional.
 
 Its goal is to make coding with LLM agents more efficient by reducing stale or
-misleading repository context. It removes ordinary line and block comments while
-preserving the two comment-shaped signals that remain load-bearing here:
-`AUTO-TRAIT-POLICY-*` markers and `// SAFETY:` lines. Doc comments are kept,
-normalised to idiomatic rustdoc links, and linted when they grow too long.
-Repository documentation files are reported but never rewritten. Output stays
-terse, structured, and informative for automated agents.
+misleading repository context. It removes every non-doc line and block comment,
+with no carve-outs. Doc comments are kept, normalised to idiomatic rustdoc
+links, and linted when they grow too long. Repository documentation files are
+reported but never rewritten. Output stays terse, structured, and informative
+for automated agents.
 
 Default mode is read-only: it walks Rust source files under `crates/` and `src/`
 and reports doc comments whose prose exceeds the configured word budget. Fenced
-code blocks are excluded from the count, and output is tab-separated so agents
-and scripts can parse it reliably.
+code blocks are excluded from the count. Findings, run diagnostics, errors and
+summaries are all emitted as JSON Lines so agents and scripts can parse them
+reliably even when a path or item label contains a tab or a newline. The one
+exception is the `--dry-run` unified diff body, which is human-facing plain
+text and is never machine-parsed; filtering output to lines starting with `{`
+yields exactly the records. See [docs/record-format.md](docs/record-format.md)
+for the record grammar and its compatibility rules.
 
 Rewrite mode performs two byte-preserving passes outside their target text:
 
 1. canonicalise Rust intra-doc-link idioms in doc payloads, for example
    `[Type](Type)` to ``[`Type`]``;
-2. strip ordinary non-doc `//` and `/* */` comments via the rustc lexer.
+2. strip every non-doc `//` and `/* */` comment via the rustc lexer.
 
-Doc comments are never deleted. `// SAFETY:` lines and
-`AUTO-TRAIT-POLICY-BEGIN` / `AUTO-TRAIT-POLICY-END` marker lines are preserved.
-Use `--dry-run` to inspect the unified diff before writing files.
+Doc comments are never deleted; nothing else is preserved. There is no
+`// SAFETY:` exception and no marker allowlist — a comment is a doc comment or
+it is removed. Use `--dry-run` to inspect the unified diff before writing
+files.
 
 ## Install
 
@@ -75,8 +80,9 @@ written to a sibling temporary file in the same directory, given the
 destination's permissions, flushed and `sync_all`'d, and only then
 renamed over the destination. Immediately before the rename the tool
 re-reads the destination and aborts if it no longer holds the bytes that
-were originally read; the abort is reported as `CONFLICT_ERROR` on
-stderr and exits `5`, leaving the destination byte-identical.
+were originally read; the abort is reported as a
+`{"record":"run_error","kind":"conflict",...}` record on stderr and exits
+`5`, leaving the destination byte-identical.
 
 Deliberate limits of that scheme:
 

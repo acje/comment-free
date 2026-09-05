@@ -29,56 +29,298 @@ fn read(dir: &Path, name: &str) -> String {
     fs::read_to_string(dir.join("src").join(name)).expect("read fixture")
 }
 
-#[derive(Debug)]
-struct ParsedHint<'a> {
-    path: &'a str,
-    line: u32,
-    item: String,
-    words: u32,
-    budget: u32,
-    kind: String,
-    v: u32,
+const MAX_RECORD_VERSION: u32 = 2;
+
+#[derive(Debug, PartialEq, Eq)]
+enum Field {
+    Text(String),
+    Number(u32),
+    Bool(bool),
 }
 
-fn parse_hint(line: &str) -> Option<ParsedHint<'_>> {
-    let mut fields = line.split('\t');
-    if fields.next()? != "DOC_LINT_HINT" {
-        return None;
+#[derive(Debug, PartialEq, Eq)]
+enum RecordError {
+    Malformed(String),
+    DuplicateField(String),
+    UnknownField(String),
+    UnknownRecord(String),
+    VersionTooNew(u32),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Record {
+    fields: Vec<(String, Field)>,
+}
+
+impl Record {
+    fn get(&self, key: &str) -> &Field {
+        self.fields.iter().find(|(k, _)| k == key).map_or_else(
+            || panic!("record has no field `{key}`: {:?}", self.fields),
+            |(_, v)| v,
+        )
     }
-    let locator = fields.next()?;
-    let (path, lineno_s) = locator.rsplit_once(':')?;
-    let lineno: u32 = lineno_s.parse().ok()?;
-    let mut item = None;
-    let mut words = None;
-    let mut budget = None;
-    let mut kind = None;
-    let mut v = None;
-    for f in fields {
-        if let Some(rest) = f.strip_prefix("item=") {
-            item = Some(rest.to_string());
-        } else if let Some(rest) = f.strip_prefix("words=") {
-            words = rest.parse().ok();
-        } else if let Some(rest) = f.strip_prefix("budget=") {
-            budget = rest.parse().ok();
-        } else if let Some(rest) = f.strip_prefix("kind=") {
-            kind = Some(rest.to_string());
-        } else if let Some(rest) = f.strip_prefix("v=") {
-            v = rest.parse().ok();
+    fn text(&self, key: &str) -> &str {
+        match self.get(key) {
+            Field::Text(t) => t,
+            other => panic!("field `{key}` is not a string: {other:?}"),
         }
     }
-    Some(ParsedHint {
-        path,
-        line: lineno,
-        item: item?,
-        words: words?,
-        budget: budget?,
-        kind: kind?,
-        v: v?,
-    })
+    fn number(&self, key: &str) -> u32 {
+        match self.get(key) {
+            Field::Number(n) => *n,
+            other => panic!("field `{key}` is not a number: {other:?}"),
+        }
+    }
+    fn boolean(&self, key: &str) -> bool {
+        match self.get(key) {
+            Field::Bool(b) => *b,
+            other => panic!("field `{key}` is not a boolean: {other:?}"),
+        }
+    }
+    fn name(&self) -> &str {
+        self.text("record")
+    }
+}
+
+fn schema(record: &str) -> Option<&'static [&'static str]> {
+    match record {
+        "doc_lint_finding" => Some(&[
+            "record",
+            "v",
+            "outcome",
+            "kind",
+            "path",
+            "line",
+            "item",
+            "words",
+            "budget",
+            "fail_closed",
+        ]),
+        "doc_lint_header" => Some(&["record", "v", "kind", "doctrine"]),
+        "doc_lint_hint" => Some(&[
+            "record", "v", "outcome", "kind", "path", "line", "item", "words", "budget",
+        ]),
+        "doc_lint_truncated" => Some(&["record", "v", "kind", "remaining"]),
+        "rewrite_summary" => Some(&[
+            "record",
+            "v",
+            "mode",
+            "comments_removed",
+            "inline_trimmed",
+            "blank_lines_collapsed",
+            "doc_links_rewritten",
+        ]),
+        "run_error" => Some(&["record", "v", "kind", "path", "message"]),
+        "doc_file_warning" => Some(&["record", "v", "path"]),
+        "rewrite_file" => Some(&["record", "v", "mode", "path"]),
+        "strip_summary" => Some(&["record", "v", "mode", "rewritten", "unchanged", "errors"]),
+        "lint_summary" => Some(&["record", "v", "files", "findings", "errors"]),
+        _ => None,
+    }
+}
+
+struct Scanner<'a> {
+    src: &'a str,
+    pos: usize,
+}
+
+impl Scanner<'_> {
+    fn peek(&self) -> Option<char> {
+        self.src[self.pos..].chars().next()
+    }
+    fn bump(&mut self) -> Option<char> {
+        let c = self.peek()?;
+        self.pos += c.len_utf8();
+        Some(c)
+    }
+    fn expect(&mut self, want: char) -> Result<(), RecordError> {
+        match self.bump() {
+            Some(c) if c == want => Ok(()),
+            other => Err(RecordError::Malformed(format!(
+                "expected `{want}` at byte {}, found {other:?}",
+                self.pos
+            ))),
+        }
+    }
+    fn string(&mut self) -> Result<String, RecordError> {
+        self.expect('"')?;
+        let mut out = String::new();
+        loop {
+            let c = self
+                .bump()
+                .ok_or_else(|| RecordError::Malformed("unterminated string".to_string()))?;
+            match c {
+                '"' => return Ok(out),
+                '\\' => out.push(self.escape()?),
+                c if (c as u32) < 0x20 => {
+                    return Err(RecordError::Malformed(format!(
+                        "raw control character U+{:04X} inside string",
+                        c as u32
+                    )));
+                }
+                c => out.push(c),
+            }
+        }
+    }
+    fn escape(&mut self) -> Result<char, RecordError> {
+        let esc = self
+            .bump()
+            .ok_or_else(|| RecordError::Malformed("unterminated escape".to_string()))?;
+        match esc {
+            '"' => Ok('"'),
+            '\\' => Ok('\\'),
+            '/' => Ok('/'),
+            'b' => Ok('\u{08}'),
+            'f' => Ok('\u{0c}'),
+            'n' => Ok('\n'),
+            'r' => Ok('\r'),
+            't' => Ok('\t'),
+            'u' => {
+                let mut code = 0u32;
+                for _ in 0..4 {
+                    let digit = self.bump().and_then(|c| c.to_digit(16)).ok_or_else(|| {
+                        RecordError::Malformed("truncated \\u escape".to_string())
+                    })?;
+                    code = code * 16 + digit;
+                }
+                char::from_u32(code)
+                    .ok_or_else(|| RecordError::Malformed(format!("bad code point U+{code:04X}")))
+            }
+            other => Err(RecordError::Malformed(format!(
+                "unknown escape `\\{other}`"
+            ))),
+        }
+    }
+    fn literal(&mut self, want: &str) -> Result<(), RecordError> {
+        if self.src[self.pos..].starts_with(want) {
+            self.pos += want.len();
+            Ok(())
+        } else {
+            Err(RecordError::Malformed(format!(
+                "expected literal `{want}` at byte {}",
+                self.pos
+            )))
+        }
+    }
+    fn number(&mut self) -> Result<u32, RecordError> {
+        let start = self.pos;
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            self.bump();
+        }
+        self.src[start..self.pos]
+            .parse()
+            .map_err(|_| RecordError::Malformed(format!("bad number at byte {start}")))
+    }
+    fn value(&mut self) -> Result<Field, RecordError> {
+        match self.peek() {
+            Some('"') => Ok(Field::Text(self.string()?)),
+            Some('t') => self.literal("true").map(|()| Field::Bool(true)),
+            Some('f') => self.literal("false").map(|()| Field::Bool(false)),
+            Some(c) if c.is_ascii_digit() => self.number().map(Field::Number),
+            other => Err(RecordError::Malformed(format!(
+                "unsupported value at byte {}: {other:?}",
+                self.pos
+            ))),
+        }
+    }
+}
+
+fn parse_record(line: &str) -> Result<Record, RecordError> {
+    let mut scanner = Scanner { src: line, pos: 0 };
+    scanner.expect('{')?;
+    let mut fields: Vec<(String, Field)> = Vec::new();
+    loop {
+        let key = scanner.string()?;
+        scanner.expect(':')?;
+        let value = scanner.value()?;
+        if fields.iter().any(|(k, _)| *k == key) {
+            return Err(RecordError::DuplicateField(key));
+        }
+        fields.push((key, value));
+        match scanner.bump() {
+            Some(',') => {}
+            Some('}') => break,
+            other => {
+                return Err(RecordError::Malformed(format!(
+                    "expected `,` or `}}` at byte {}, found {other:?}",
+                    scanner.pos
+                )));
+            }
+        }
+    }
+    if scanner.pos != line.len() {
+        return Err(RecordError::Malformed(format!(
+            "trailing bytes after record at byte {}",
+            scanner.pos
+        )));
+    }
+    let record = match fields.iter().find(|(k, _)| k == "record") {
+        Some((_, Field::Text(name))) => name.clone(),
+        _ => return Err(RecordError::Malformed("missing `record` field".to_string())),
+    };
+    let known = schema(&record).ok_or_else(|| RecordError::UnknownRecord(record.clone()))?;
+    if let Some((key, _)) = fields.iter().find(|(k, _)| !known.contains(&k.as_str())) {
+        return Err(RecordError::UnknownField(key.clone()));
+    }
+    match fields.iter().find(|(k, _)| k == "v") {
+        Some((_, Field::Number(v))) if *v <= MAX_RECORD_VERSION => {}
+        Some((_, Field::Number(v))) => return Err(RecordError::VersionTooNew(*v)),
+        _ => return Err(RecordError::Malformed("missing `v` field".to_string())),
+    }
+    Ok(Record { fields })
+}
+
+fn records(stream: &str) -> Vec<Record> {
+    stream
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .map(|l| parse_record(l).unwrap_or_else(|e| panic!("unparseable record {l}: {e:?}")))
+        .collect()
+}
+
+fn records_named(stream: &str, name: &str) -> Vec<Record> {
+    records(stream)
+        .into_iter()
+        .filter(|r| r.name() == name)
+        .collect()
+}
+
+fn one_record(stream: &str, name: &str) -> Record {
+    let mut found = records_named(stream, name);
+    assert_eq!(
+        found.len(),
+        1,
+        "expected exactly one `{name}` record:\n{stream}"
+    );
+    found.remove(0)
+}
+
+fn error_records(stream: &str, kind: &str) -> Vec<Record> {
+    records_named(stream, "run_error")
+        .into_iter()
+        .filter(|r| r.text("kind") == kind)
+        .collect()
+}
+
+fn one_error(stream: &str, kind: &str) -> Record {
+    let mut found = error_records(stream, kind);
+    assert_eq!(
+        found.len(),
+        1,
+        "expected exactly one `{kind}` run_error record:\n{stream}"
+    );
+    found.remove(0)
+}
+
+fn rewritten_paths(stream: &str) -> Vec<String> {
+    records_named(stream, "rewrite_file")
+        .into_iter()
+        .map(|r| r.text("path").to_string())
+        .collect()
 }
 
 #[test]
-fn preserves_auto_trait_policy_markers() {
+fn strips_auto_trait_policy_markers() {
     let td = tempfile::tempdir().unwrap();
     let original = "// AUTO-TRAIT-POLICY-BEGIN\n\
                     // Mission rescue-pardosa-59y0: bucket every pub type.\n\
@@ -94,28 +336,20 @@ fn preserves_auto_trait_policy_markers() {
     run(td.path());
     let out = read(td.path(), "lib.rs");
     assert!(
-        out.contains("AUTO-TRAIT-POLICY-BEGIN"),
-        "BEGIN marker missing after rewrite:\n{out}"
+        !out.contains("AUTO-TRAIT-POLICY"),
+        "gh-report marker comments are no longer carved out; they must be stripped:\n{out}"
     );
     assert!(
-        out.contains("AUTO-TRAIT-POLICY-END"),
-        "END marker missing after rewrite:\n{out}"
-    );
-    let begin = out.find("AUTO-TRAIT-POLICY-BEGIN").unwrap();
-    let end = out.find("AUTO-TRAIT-POLICY-END").unwrap();
-    assert!(begin < end, "markers in wrong order:\n{out}");
-    let between = &out[begin..end];
-    assert!(
-        between.contains("assert_auto_traits"),
-        "assert_auto_traits! not between markers:\n{out}"
+        out.contains("assert_auto_traits"),
+        "the macro invocation is code, not a comment, and must survive:\n{out}"
     );
     assert!(
         !out.contains("Mission rescue-pardosa-59y0"),
-        "ordinary line comment leaked through marker preservation:\n{out}"
+        "ordinary line comment must be stripped:\n{out}"
     );
 }
 #[test]
-fn preserves_auto_trait_policy_markers_around_multiple_macro_blocks() {
+fn strips_auto_trait_policy_markers_around_multiple_macro_blocks() {
     let td = tempfile::tempdir().unwrap();
     let original = "// AUTO-TRAIT-POLICY-BEGIN\n\
                     // Mission rescue-pardosa-59y0: bucket every pub type.\n\
@@ -137,31 +371,21 @@ fn preserves_auto_trait_policy_markers_around_multiple_macro_blocks() {
     run(td.path());
     let out = read(td.path(), "lib.rs");
     assert!(
-        out.contains("AUTO-TRAIT-POLICY-BEGIN"),
-        "BEGIN marker missing after rewrite:\n{out}"
+        !out.contains("AUTO-TRAIT-POLICY"),
+        "both marker comments must be stripped:\n{out}"
     );
-    assert!(
-        out.contains("AUTO-TRAIT-POLICY-END"),
-        "END marker missing after rewrite:\n{out}"
-    );
-    let begin = out.find("AUTO-TRAIT-POLICY-BEGIN").unwrap();
-    let end = out.find("AUTO-TRAIT-POLICY-END").unwrap();
-    assert!(begin < end, "markers in wrong order:\n{out}");
-    let between = &out[begin..end];
-    let macro_count = between.matches("assert_auto_traits").count();
+    let macro_count = out.matches("assert_auto_traits").count();
     assert_eq!(
         macro_count, 2,
-        "expected both assert_auto_traits! blocks between markers, found {macro_count}:\n{out}"
+        "both assert_auto_traits! blocks are code and must survive, found {macro_count}:\n{out}"
     );
     assert!(
-        between.contains("cfg(any(test, feature = \"test-support\"))")
-            || between.contains("cfg (any (test , feature = \"test-support\"))")
-            || between.contains("test-support"),
-        "cfg-gated second block must stay inside markers:\n{out}"
+        out.contains("test-support"),
+        "the cfg-gated second block must survive:\n{out}"
     );
     assert!(
         !out.contains("Mission rescue-pardosa-59y0"),
-        "ordinary line comment leaked through marker preservation:\n{out}"
+        "ordinary line comment must be stripped:\n{out}"
     );
 }
 #[test]
@@ -343,9 +567,10 @@ fn leaves_unparseable_file_untouched() {
     let after = read(td.path(), "broken.rs");
     assert_eq!(after, original, "unparseable file was modified");
     let stderr = String::from_utf8_lossy(&out.stderr);
+    let err = one_error(&stderr, "parse");
     assert!(
-        stderr.contains("PARSE_ERROR"),
-        "expected PARSE_ERROR diagnostic, got: {stderr}"
+        err.text("path").ends_with("broken.rs"),
+        "parse run_error must name the unparseable file, got: {stderr}"
     );
 }
 #[test]
@@ -364,9 +589,10 @@ fn dry_run_emits_unified_diff() {
     write(td.path(), "a.rs", original);
     let out = run_dry(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("WOULD_REWRITE"),
-        "no WOULD_REWRITE tag:\n{stdout}"
+    assert_eq!(
+        one_record(&stdout, "rewrite_file").text("mode"),
+        "dry-run",
+        "dry-run must tag the rewrite_file record as dry-run:\n{stdout}"
     );
     assert!(
         stdout.contains("--- a/"),
@@ -382,8 +608,9 @@ fn dry_run_emits_unified_diff() {
         "removed line not shown in diff:\n{stdout}"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("mode=dry-run"),
+    assert_eq!(
+        one_record(&stderr, "strip_summary").text("mode"),
+        "dry-run",
         "summary missing mode=dry-run on stderr:\n{stderr}"
     );
 }
@@ -401,9 +628,10 @@ fn dry_run_short_flag_works() {
     let after = read(td.path(), "a.rs");
     assert_eq!(after, original, "-n modified the file");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        stdout.contains("WOULD_REWRITE"),
-        "-n did not produce WOULD_REWRITE:\n{stdout}"
+    assert_eq!(
+        one_record(&stdout, "rewrite_file").text("mode"),
+        "dry-run",
+        "-n did not produce a dry-run rewrite_file record:\n{stdout}"
     );
 }
 #[test]
@@ -413,12 +641,13 @@ fn dry_run_unchanged_file_emits_no_diff() {
     let out = run_dry(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        !stdout.contains("WOULD_REWRITE"),
-        "spurious WOULD_REWRITE for empty file:\n{stdout}"
+        rewritten_paths(&stdout).is_empty(),
+        "spurious rewrite_file record for empty file:\n{stdout}"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("unchanged=1"),
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("unchanged"),
+        1,
         "summary did not count file as unchanged on stderr:\n{stderr}"
     );
 }
@@ -428,8 +657,9 @@ fn write_mode_summary_says_mode_write() {
     write(td.path(), "a.rs", "// kill me\nfn f() {}\n");
     let out = run(td.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("mode=write"),
+    assert_eq!(
+        one_record(&stderr, "strip_summary").text("mode"),
+        "write",
         "summary missing mode=write on stderr:\n{stderr}"
     );
 }
@@ -447,8 +677,10 @@ fn doc_warn_emits_when_root_is_dot() {
         .expect("failed to spawn comment-free");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("DOC_WARN") && stderr.contains("README.md"),
-        "DOC_WARN missing when ROOT='.':\n{stderr}"
+        one_record(&stderr, "doc_file_warning")
+            .text("path")
+            .ends_with("README.md"),
+        "doc_file_warning missing when ROOT='.':\n{stderr}"
     );
 }
 #[test]
@@ -468,15 +700,16 @@ fn scan_doc_files_skips_vendor_dirs() {
         .output()
         .expect("failed to spawn comment-free");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let warn_count = stderr.matches("DOC_WARN").count();
+    let warned = records_named(&stderr, "doc_file_warning");
     assert_eq!(
-        warn_count, 1,
-        "expected exactly 1 DOC_WARN (root README.md), got {warn_count}:\n{stderr}"
+        warned.len(),
+        1,
+        "expected exactly 1 doc_file_warning (root README.md):\n{stderr}"
     );
     for sub in ["node_modules", "vendor", "dist", "build", "target"] {
         assert!(
-            !stderr.contains(sub),
-            "DOC_WARN unexpectedly reported file under {sub}/:\n{stderr}"
+            !warned[0].text("path").contains(sub),
+            "doc_file_warning unexpectedly reported file under {sub}/:\n{stderr}"
         );
     }
 }
@@ -510,8 +743,10 @@ fn strip_with_parse_error_exits_five() {
         "strip-mode per-file error must exit 5:\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stderr.contains("PARSE_ERROR"),
-        "missing PARSE_ERROR diagnostic:\n{stderr}"
+        one_error(&stderr, "parse")
+            .text("path")
+            .ends_with("broken.rs"),
+        "missing parse run_error naming broken.rs:\n{stderr}"
     );
 }
 #[test]
@@ -531,9 +766,14 @@ fn strip_with_a_write_conflict_exits_five_and_leaves_the_file_untouched() {
         Some(5),
         "a write conflict must exit 5:\nstdout: {stdout}\nstderr: {stderr}"
     );
+    let conflict = one_error(&stderr, "conflict");
     assert!(
-        stderr.contains("CONFLICT_ERROR"),
-        "missing CONFLICT_ERROR diagnostic:\n{stderr}"
+        conflict.text("path").ends_with("a.rs"),
+        "conflict run_error must name the abandoned file:\n{stderr}"
+    );
+    assert_eq!(
+        conflict.text("message"),
+        "destination changed since it was read"
     );
     assert_eq!(read(td.path(), "a.rs"), "// drop me\nfn f() {}\n");
     let mut residue: Vec<String> = fs::read_dir(td.path().join("src"))
@@ -582,7 +822,11 @@ fn default_mode_is_lint() {
         "default mode must be lint, expected exit 4, got {:?}\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code()
     );
-    assert!(stdout.contains("DOC_LINT\t"), "missing DOC_LINT:\n{stdout}");
+    assert_eq!(
+        records_named(&stdout, "doc_lint_finding").len(),
+        1,
+        "missing doc_lint_finding record:\n{stdout}"
+    );
     let after = read(td.path(), "a.rs");
     assert_eq!(after, doc, "default mode must not modify files");
 }
@@ -604,8 +848,8 @@ fn lint_within_budget_exits_zero() {
         out.status.code()
     );
     assert!(
-        !stdout.contains("DOC_LINT"),
-        "no DOC_LINT expected within budget:\n{stdout}"
+        records(&stdout).is_empty(),
+        "no lint record expected within budget:\n{stdout}"
     );
 }
 #[test]
@@ -631,11 +875,16 @@ fn lint_over_budget_exits_four() {
         "expected exit 4, got {:?}\nstdout: {stdout}\nstderr: {stderr}",
         out.status.code()
     );
-    assert!(stdout.contains("DOC_LINT\t"), "missing record:\n{stdout}");
-    assert!(stdout.contains("words=90"), "wrong words field:\n{stdout}");
-    assert!(
-        stdout.contains("budget=80"),
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.number("words"), 90, "wrong words field:\n{stdout}");
+    assert_eq!(
+        finding.number("budget"),
+        80,
         "wrong budget field:\n{stdout}"
+    );
+    assert!(
+        !finding.boolean("fail_closed"),
+        "unexpected fail-closed recount:\n{stdout}"
     );
 }
 #[test]
@@ -654,51 +903,23 @@ fn lint_over_budget_emits_header_once_then_hint() {
     write(td.path(), "a.rs", doc);
     let out = run_lint(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
+    let header = one_record(&stdout, "doc_lint_header");
+    assert_eq!(header.text("kind"), "overlong_doc");
     assert!(
-        !stdout.contains("DOC_LINT_MSG"),
-        "legacy DOC_LINT_MSG must no longer appear:\n{stdout}"
-    );
-    let header_count = stdout.matches("DOC_LINT_HEADER\t").count();
-    assert_eq!(
-        header_count, 1,
-        "expected exactly one DOC_LINT_HEADER for one finding kind:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("DOC_LINT_HEADER\tkind=overlong_doc"),
-        "header must carry kind=overlong_doc:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("Rust docs must contain a concise summary"),
+        header
+            .text("doctrine")
+            .contains("Rust docs must contain a concise summary"),
         "header should embed the doctrine sentence once:\n{stdout}"
     );
-    let hint_count = stdout.matches("DOC_LINT_HINT\t").count();
-    assert_eq!(hint_count, 1, "expected one DOC_LINT_HINT:\n{stdout}");
+    let hint = one_record(&stdout, "doc_lint_hint");
+    assert_eq!(hint.number("words"), 90);
+    assert_eq!(hint.number("budget"), 80);
+    assert_eq!(hint.text("item"), "fn f");
+    assert_eq!(hint.text("kind"), "overlong_doc");
+    assert_eq!(hint.text("outcome"), "finding");
+    assert_eq!(hint.number("v"), 2, "hint must carry record-version v=2");
     assert!(
-        stdout.contains("DOC_LINT_HINT\t"),
-        "missing hint:\n{stdout}"
-    );
-    let hint_line = stdout
-        .lines()
-        .find(|l| l.starts_with("DOC_LINT_HINT\t"))
-        .expect("hint line");
-    assert!(
-        hint_line.contains("words=90") && hint_line.contains("budget=80"),
-        "hint missing words/budget fields: {hint_line}"
-    );
-    assert!(
-        hint_line.contains("item=fn f"),
-        "hint missing item label: {hint_line}"
-    );
-    assert!(
-        hint_line.contains("kind=overlong_doc"),
-        "hint must carry kind=overlong_doc: {hint_line}"
-    );
-    assert!(
-        hint_line.contains("v=1"),
-        "hint must carry record-version v=1: {hint_line}"
-    );
-    assert!(
-        !stdout.contains("DOC_LINT_TRUNCATED"),
+        records_named(&stdout, "doc_lint_truncated").is_empty(),
         "no truncation expected for single finding:\n{stdout}"
     );
 }
@@ -726,14 +947,14 @@ fn lint_header_emitted_once_for_many_findings() {
     let out = run_lint(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        stdout.matches("DOC_LINT_HEADER\t").count(),
+        records_named(&stdout, "doc_lint_header").len(),
         1,
         "header must be emitted exactly once regardless of finding count:\n{stdout}"
     );
     assert_eq!(
-        stdout.matches("DOC_LINT_HINT\t").count(),
+        records_named(&stdout, "doc_lint_hint").len(),
         5,
-        "expected 5 DOC_LINT_HINT records:\n{stdout}"
+        "expected 5 doc_lint_hint records:\n{stdout}"
     );
 }
 
@@ -757,74 +978,36 @@ fn lint_truncates_hints_beyond_fifty_with_residual() {
     let out = run_lint(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
-        stdout.matches("DOC_LINT_HINT\t").count(),
+        records_named(&stdout, "doc_lint_hint").len(),
         50,
         "hints must be capped at 50:\n{stdout}"
     );
-    let truncated_count = stdout.matches("DOC_LINT_TRUNCATED\t").count();
+    let truncated = one_record(&stdout, "doc_lint_truncated");
+    assert_eq!(truncated.text("kind"), "overlong_doc");
     assert_eq!(
-        truncated_count, 1,
-        "expected one DOC_LINT_TRUNCATED line:\n{stdout}"
-    );
-    let trunc_line = stdout
-        .lines()
-        .find(|l| l.starts_with("DOC_LINT_TRUNCATED\t"))
-        .expect("truncated line");
-    assert!(
-        trunc_line.contains("kind=overlong_doc"),
-        "truncation must name kind: {trunc_line}"
-    );
-    assert!(
-        trunc_line.contains(&format!("remaining={}", n_items - 50)),
-        "truncation must carry remaining=10 (60 findings - 50 cap), got: {trunc_line}"
+        truncated.number("remaining"),
+        u32::try_from(n_items - 50).unwrap(),
+        "truncation must carry remaining=10 (60 findings - 50 cap)"
     );
 }
 
 #[test]
-fn lint_hint_record_is_tab_separated_with_named_fields() {
+fn lint_hint_record_is_a_json_object_with_named_fields() {
     let td = tempfile::tempdir().unwrap();
     let doc = "/// w01 w02 w03 w04 w05 w06\n\
                pub fn f() {}\n";
     write(td.path(), "a.rs", doc);
     let out = run_lint_budget(td.path(), 5);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let hint = stdout
-        .lines()
-        .find(|l| l.starts_with("DOC_LINT_HINT\t"))
-        .expect("hint present");
-    let fields: Vec<&str> = hint.split('\t').collect();
-    assert!(
-        fields.len() >= 7,
-        "expected at least 7 tab fields (tag, path:line, item, words, budget, kind, v): {hint}"
-    );
-    assert_eq!(fields[0], "DOC_LINT_HINT");
-    assert!(
-        fields[1].contains("a.rs:"),
-        "second field must be path:line, got: {}",
-        fields[1]
-    );
-    let mut have_item = false;
-    let mut have_words = false;
-    let mut have_budget = false;
-    let mut have_kind = false;
-    let mut have_v = false;
-    for f in fields.iter().skip(2) {
-        if let Some(rest) = f.strip_prefix("item=") {
-            have_item = !rest.is_empty();
-        } else if let Some(rest) = f.strip_prefix("words=") {
-            have_words = rest.parse::<u32>().is_ok();
-        } else if let Some(rest) = f.strip_prefix("budget=") {
-            have_budget = rest.parse::<u32>().is_ok();
-        } else if let Some(rest) = f.strip_prefix("kind=") {
-            have_kind = !rest.is_empty();
-        } else if let Some(rest) = f.strip_prefix("v=") {
-            have_v = rest.parse::<u32>().is_ok();
-        }
-    }
-    assert!(
-        have_item && have_words && have_budget && have_kind && have_v,
-        "hint missing one of item/words/budget/kind/v: {hint}"
-    );
+    let hint = one_record(&stdout, "doc_lint_hint");
+    assert!(hint.text("path").ends_with("a.rs"), "{stdout}");
+    assert!(hint.number("line") > 0, "line must be 1-indexed positive");
+    assert!(!hint.text("item").is_empty());
+    assert_eq!(hint.number("words"), 6);
+    assert_eq!(hint.number("budget"), 5);
+    assert_eq!(hint.text("kind"), "overlong_doc");
+    assert_eq!(hint.text("outcome"), "finding");
+    assert_eq!(hint.number("v"), 2);
 }
 
 #[test]
@@ -851,15 +1034,9 @@ fn lint_hints_sorted_by_overshoot_descending_before_truncation() {
     write(td.path(), "a.rs", &src);
     let out = run_lint(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let hint_word_counts: Vec<u32> = stdout
-        .lines()
-        .filter(|l| l.starts_with("DOC_LINT_HINT\t"))
-        .map(|l| {
-            l.split('\t')
-                .find_map(|f| f.strip_prefix("words="))
-                .and_then(|n| n.parse::<u32>().ok())
-                .unwrap_or(0)
-        })
+    let hint_word_counts: Vec<u32> = records_named(&stdout, "doc_lint_hint")
+        .iter()
+        .map(|r| r.number("words"))
         .collect();
     assert_eq!(hint_word_counts.len(), 50, "expected 50 hints:\n{stdout}");
     let sorted = {
@@ -894,7 +1071,7 @@ fn lint_fenced_code_excluded() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}");
     assert!(
-        !stdout.contains("DOC_LINT"),
+        records(&stdout).is_empty(),
         "fenced code should be excluded:\n{stdout}"
     );
 }
@@ -920,7 +1097,7 @@ fn lint_tilde_fenced_code_excluded() {
         "tilde-fenced example body must be excluded from word budget; stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
-        !stdout.contains("DOC_LINT"),
+        records(&stdout).is_empty(),
         "tilde-fenced code should be excluded from word count:\n{stdout}"
     );
 }
@@ -943,8 +1120,10 @@ fn lint_with_parse_error_exits_five() {
         "parse error during lint must exit 5:\nstderr: {stderr}"
     );
     assert!(
-        stderr.contains("PARSE_ERROR"),
-        "missing PARSE_ERROR diagnostic:\n{stderr}"
+        one_error(&stderr, "parse")
+            .text("path")
+            .ends_with("broken.rs"),
+        "missing parse run_error naming broken.rs:\n{stderr}"
     );
 }
 #[test]
@@ -958,10 +1137,9 @@ fn lint_custom_budget_honoured() {
     let out = run_lint_budget(td.path(), 5);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(4), "stdout:\n{stdout}");
-    assert!(
-        stdout.contains("DOC_LINT\t") && stdout.contains("budget=5") && stdout.contains("words=6"),
-        "expected DOC_LINT with budget=5 words=6:\n{stdout}"
-    );
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(finding.number("budget"), 5, "{stdout}");
+    assert_eq!(finding.number("words"), 6, "{stdout}");
 }
 #[test]
 fn dry_run_processes_crates_and_src_but_skips_target_and_docs() {
@@ -993,13 +1171,14 @@ fn dry_run_processes_crates_and_src_but_skips_target_and_docs() {
         "exit {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         out.status.code()
     );
+    let paths = rewritten_paths(&stdout);
     assert!(
-        stdout.contains("src/lib.rs"),
-        "expected src/lib.rs WOULD_REWRITE:\n{stdout}"
+        paths.iter().any(|p| p.ends_with("src/lib.rs")),
+        "expected a src/lib.rs rewrite_file record:\n{stdout}"
     );
     assert!(
-        stdout.contains("crates/foo/src/lib.rs"),
-        "expected crates/foo/src/lib.rs WOULD_REWRITE:\n{stdout}"
+        paths.iter().any(|p| p.contains("crates/foo/src/lib.rs")),
+        "expected a crates/foo/src/lib.rs rewrite_file record:\n{stdout}"
     );
     for forbidden in ["target/package", "docs/example.rs", "scripts/helper.rs"] {
         assert!(
@@ -1038,14 +1217,10 @@ fn lint_processes_crates_and_src_but_skips_target_and_docs() {
         Some(4),
         "expected exit 4 (one in-scope finding); stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    let lint_count = stdout.matches("DOC_LINT\t").count();
-    assert_eq!(
-        lint_count, 1,
-        "expected exactly 1 DOC_LINT finding (src/lib.rs); got {lint_count}:\n{stdout}"
-    );
+    let finding = one_record(&stdout, "doc_lint_finding");
     assert!(
-        stdout.contains("src/lib.rs"),
-        "expected DOC_LINT to cite src/lib.rs:\n{stdout}"
+        finding.text("path").ends_with("src/lib.rs"),
+        "expected the finding to cite src/lib.rs:\n{stdout}"
     );
     for forbidden in ["target/package", "docs/example.rs"] {
         assert!(
@@ -1092,13 +1267,17 @@ fn root_without_crates_or_src_processes_nothing() {
         out.status.code()
     );
     assert!(
-        !stdout.contains("WOULD_REWRITE"),
+        rewritten_paths(&stdout).is_empty(),
         "no rewrites expected when root has no allowed source tree:\n{stdout}"
     );
-    assert!(
-        stderr.contains("rewritten=0")
-            && stderr.contains("unchanged=0")
-            && stderr.contains("errors=0"),
+    let summary = one_record(&stderr, "strip_summary");
+    assert_eq!(
+        (
+            summary.number("rewritten"),
+            summary.number("unchanged"),
+            summary.number("errors")
+        ),
+        (0, 0, 0),
         "summary should reflect zero work:\n{stderr}"
     );
 }
@@ -1183,8 +1362,10 @@ fn root_inside_crates_subtree_is_processed_directly() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "exit {:?}", out.status.code());
     assert!(
-        stdout.contains("src/lib.rs"),
-        "expected src/lib.rs WOULD_REWRITE when ROOT is inside crates/:\n{stdout}"
+        rewritten_paths(&stdout)
+            .iter()
+            .any(|p| p.ends_with("src/lib.rs")),
+        "expected a src/lib.rs rewrite_file record when ROOT is inside crates/:\n{stdout}"
     );
 }
 fn run_idioms(root: &Path) -> std::process::Output {
@@ -1398,8 +1579,13 @@ fn idioms_flag_dry_run_does_not_modify_file() {
     let after = read(td.path(), "a.rs");
     assert_eq!(after, original, "dry-run must not write");
     let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        one_record(&stdout, "rewrite_file").text("mode"),
+        "dry-run",
+        "dry-run must emit a dry-run rewrite_file record:\n{stdout}"
+    );
     assert!(
-        stdout.contains("WOULD_REWRITE") && stdout.contains("[`Type`]"),
+        stdout.contains("[`Type`]"),
         "dry-run diff should show the would-be rewrite, got stdout:\n{stdout}"
     );
 }
@@ -1663,7 +1849,7 @@ fn safe_idiom_path_does_not_inject_auto_trait_markers() {
 }
 
 #[test]
-fn safety_line_comment_is_preserved() {
+fn safety_line_comment_is_stripped() {
     let td = tempfile::tempdir().unwrap();
     let original = "fn f() {\n    \
                         // SAFETY: invariants documented in module-level docs\n    \
@@ -1676,12 +1862,8 @@ fn safety_line_comment_is_preserved() {
     run(td.path());
     let out = read(td.path(), "a.rs");
     assert!(
-        out.contains("// SAFETY: invariants documented in module-level docs"),
-        "// SAFETY: line must be preserved verbatim:\n{out}"
-    );
-    assert!(
-        out.contains("// SAFETY:no-space-after-colon also matches"),
-        "// SAFETY: without space must be preserved:\n{out}"
+        !out.contains("SAFETY"),
+        "the SAFETY carve-out is gone; every non-doc comment must be stripped:\n{out}"
     );
     assert!(
         !out.contains("kill me ordinary comment"),
@@ -1690,7 +1872,7 @@ fn safety_line_comment_is_preserved() {
 }
 
 #[test]
-fn safety_block_comment_is_not_special_cased() {
+fn safety_block_comment_is_stripped() {
     let td = tempfile::tempdir().unwrap();
     let original = "fn f() {\n    \
                         /* SAFETY: this is a block comment, not the // SAFETY idiom */\n    \
@@ -1701,7 +1883,7 @@ fn safety_block_comment_is_not_special_cased() {
     let out = read(td.path(), "a.rs");
     assert!(
         !out.contains("SAFETY: this is a block comment"),
-        "/* SAFETY: */ block comment is NOT on the allowlist (only // SAFETY: is); must be stripped, got:\n{out}"
+        "/* SAFETY: */ block comment must be stripped, got:\n{out}"
     );
 }
 
@@ -1736,7 +1918,7 @@ fn raw_string_literal_with_comment_markers_round_trips_byte_identical() {
 }
 
 #[test]
-fn auto_trait_policy_markers_preserved_when_surrounding_macro_is_absent() {
+fn auto_trait_policy_markers_stripped_when_surrounding_macro_is_absent() {
     let td = tempfile::tempdir().unwrap();
     let original = "// AUTO-TRAIT-POLICY-BEGIN\n\
                     pub fn f() {}\n\
@@ -1745,12 +1927,12 @@ fn auto_trait_policy_markers_preserved_when_surrounding_macro_is_absent() {
     run(td.path());
     let out = read(td.path(), "a.rs");
     assert!(
-        out.contains("// AUTO-TRAIT-POLICY-BEGIN"),
-        "BEGIN marker on its own line must be preserved:\n{out}"
+        !out.contains("AUTO-TRAIT-POLICY"),
+        "a lone marker comment must be stripped like any other comment:\n{out}"
     );
     assert!(
-        out.contains("// AUTO-TRAIT-POLICY-END"),
-        "END marker on its own line must be preserved:\n{out}"
+        out.contains("pub fn f() {}"),
+        "surrounding code must survive:\n{out}"
     );
 }
 
@@ -1772,44 +1954,41 @@ fn doc_lint_hint_round_trip_parses_to_struct() {
     write(td.path(), "a.rs", &src);
     let out = run_lint(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let hints: Vec<ParsedHint<'_>> = stdout
-        .lines()
-        .filter(|l| l.starts_with("DOC_LINT_HINT\t"))
-        .filter_map(parse_hint)
-        .collect();
+    let hints = records_named(&stdout, "doc_lint_hint");
     assert_eq!(hints.len(), 3, "expected 3 parsed hints:\n{stdout}");
     for hint in &hints {
-        assert!(hint.path.ends_with("a.rs"), "wrong path: {}", hint.path);
-        assert!(hint.line > 0, "line must be 1-indexed positive");
         assert!(
-            hint.item.starts_with("fn f"),
-            "item label malformed: {}",
-            hint.item
+            hint.text("path").ends_with("a.rs"),
+            "wrong path: {}",
+            hint.text("path")
         );
-        assert_eq!(hint.words, 90, "expected 90 words per finding");
-        assert_eq!(hint.budget, 80, "expected default budget 80");
-        assert_eq!(hint.kind, "overlong_doc", "wrong kind: {}", hint.kind);
-        assert_eq!(hint.v, 1, "record version drift: {}", hint.v);
+        assert!(hint.number("line") > 0, "line must be 1-indexed positive");
+        assert!(
+            hint.text("item").starts_with("fn f"),
+            "item label malformed: {}",
+            hint.text("item")
+        );
+        assert_eq!(hint.number("words"), 90, "expected 90 words per finding");
+        assert_eq!(hint.number("budget"), 80, "expected default budget 80");
+        assert_eq!(hint.text("kind"), "overlong_doc");
+        assert_eq!(hint.number("v"), 2, "record version drift");
     }
 }
 
 #[test]
 fn doc_lint_record_grammar_const_is_published() {
     let g = comment_free::DOC_LINT_RECORD_GRAMMAR;
-    assert!(
-        g.contains("DOC_LINT_HEADER")
-            && g.contains("DOC_LINT_HINT")
-            && g.contains("DOC_LINT_TRUNCATED"),
-        "grammar const must name all three record kinds: {g}"
-    );
     for required in [
-        "kind=<KIND>",
-        "v=<N>",
-        "doctrine=<STRING>",
-        "words=<U32>",
-        "budget=<U32>",
-        "item=<LABEL>",
-        "remaining=<U32>",
+        "doc_lint_finding",
+        "doc_lint_header",
+        "doc_lint_hint",
+        "doc_lint_truncated",
+        "\"outcome\":<OUTCOME>",
+        "\"doctrine\":<STRING>",
+        "\"words\":<U32>",
+        "\"budget\":<U32>",
+        "\"item\":<LABEL>",
+        "\"remaining\":<U32>",
     ] {
         assert!(
             g.contains(required),
@@ -1819,11 +1998,11 @@ fn doc_lint_record_grammar_const_is_published() {
 }
 
 #[test]
-fn doc_lint_record_version_is_one() {
+fn doc_lint_record_version_is_two() {
     assert_eq!(
         comment_free::DOC_LINT_RECORD_VERSION,
-        1,
-        "SM04 contract: v=1 is the initial published record format"
+        2,
+        "v=2 is the escaped JSON Lines record format"
     );
 }
 
@@ -1846,27 +2025,13 @@ fn doc_lint_truncated_record_round_trip_parses() {
     write(td.path(), "a.rs", &src);
     let out = run_lint(td.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let trunc_line = stdout
-        .lines()
-        .find(|l| l.starts_with("DOC_LINT_TRUNCATED\t"))
-        .expect("DOC_LINT_TRUNCATED present");
-    let fields: Vec<&str> = trunc_line.split('\t').collect();
-    assert_eq!(fields[0], "DOC_LINT_TRUNCATED");
-    let mut kind = None;
-    let mut remaining: Option<u32> = None;
-    let mut v: Option<u32> = None;
-    for f in fields.iter().skip(1) {
-        if let Some(rest) = f.strip_prefix("kind=") {
-            kind = Some(rest);
-        } else if let Some(rest) = f.strip_prefix("remaining=") {
-            remaining = rest.parse().ok();
-        } else if let Some(rest) = f.strip_prefix("v=") {
-            v = rest.parse().ok();
-        }
-    }
-    assert_eq!(kind, Some("overlong_doc"));
-    assert_eq!(remaining, Some(u32::try_from(n_items - 50).unwrap()));
-    assert_eq!(v, Some(1));
+    let truncated = one_record(&stdout, "doc_lint_truncated");
+    assert_eq!(truncated.text("kind"), "overlong_doc");
+    assert_eq!(
+        truncated.number("remaining"),
+        u32::try_from(n_items - 50).unwrap()
+    );
+    assert_eq!(truncated.number("v"), 2);
 }
 
 #[test]
@@ -1879,32 +2044,21 @@ fn doc_lint_header_record_round_trip_parses() {
     );
     let out = run_lint_budget(td.path(), 5);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let header = stdout
-        .lines()
-        .find(|l| l.starts_with("DOC_LINT_HEADER\t"))
-        .expect("header present");
-    let fields: Vec<&str> = header.split('\t').collect();
-    assert_eq!(fields[0], "DOC_LINT_HEADER");
-    let mut kind = None;
-    let mut v: Option<u32> = None;
-    let mut doctrine = None;
-    for f in fields.iter().skip(1) {
-        if let Some(rest) = f.strip_prefix("kind=") {
-            kind = Some(rest);
-        } else if let Some(rest) = f.strip_prefix("v=") {
-            v = rest.parse().ok();
-        } else if let Some(rest) = f.strip_prefix("doctrine=") {
-            doctrine = Some(rest);
-        }
-    }
-    assert_eq!(kind, Some("overlong_doc"));
-    assert_eq!(v, Some(1));
-    let doctrine = doctrine.expect("doctrine field present");
+    let header = one_record(&stdout, "doc_lint_header");
+    assert_eq!(header.text("kind"), "overlong_doc");
+    assert_eq!(header.number("v"), 2);
     assert!(
-        doctrine.contains("Rust docs must contain a concise summary"),
-        "header doctrine field must carry the full doctrine sentence: {doctrine}"
+        header
+            .text("doctrine")
+            .contains("Rust docs must contain a concise summary"),
+        "header doctrine field must carry the full doctrine sentence"
+    );
+    assert!(
+        !header.text("doctrine").contains("0-3"),
+        "the unenforced 0-3 fenced-example promise must be gone from machine output"
     );
 }
+
 #[test]
 fn rewrite_summary_record_emitted_on_stderr_with_counters() {
     let td = tempfile::tempdir().unwrap();
@@ -1915,22 +2069,24 @@ fn rewrite_summary_record_emitted_on_stderr_with_counters() {
     );
     let out = run(td.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let line = stderr
-        .lines()
-        .find(|l| l.starts_with("REWRITE_SUMMARY\t"))
-        .unwrap_or_else(|| panic!("no REWRITE_SUMMARY line on stderr:\n{stderr}"));
+    let summary = one_record(&stderr, "rewrite_summary");
     for field in [
-        "comments_removed=",
-        "inline_trimmed=",
-        "blank_lines_collapsed=",
-        "doc_links_rewritten=",
-        "safety_preserved=",
-        "auto_trait_preserved=",
-        "v=1",
+        "comments_removed",
+        "inline_trimmed",
+        "blank_lines_collapsed",
+        "doc_links_rewritten",
     ] {
         assert!(
-            line.contains(field),
-            "REWRITE_SUMMARY missing `{field}` field: {line}"
+            summary.fields.iter().any(|(k, _)| k == field),
+            "rewrite_summary missing `{field}` field:\n{stderr}"
+        );
+    }
+    assert_eq!(summary.number("v"), 2);
+    assert_eq!(summary.text("mode"), "write");
+    for gone in ["safety_preserved", "auto_trait_preserved"] {
+        assert!(
+            !stderr.contains(gone),
+            "preservation counter `{gone}` must be gone from the record:\n{stderr}"
         );
     }
 }
@@ -1941,13 +2097,11 @@ fn rewrite_summary_record_counts_aggregate_over_files() {
     write(td.path(), "b.rs", "// two\n// three\nfn b() {}\n");
     let out = run(td.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let line = stderr
-        .lines()
-        .find(|l| l.starts_with("REWRITE_SUMMARY\t"))
-        .expect("REWRITE_SUMMARY present");
-    assert!(
-        line.contains("comments_removed=3"),
-        "expected aggregate comments_removed=3 across two files: {line}"
+    let summary = one_record(&stderr, "rewrite_summary");
+    assert_eq!(
+        summary.number("comments_removed"),
+        3,
+        "expected aggregate comments_removed=3 across two files:\n{stderr}"
     );
 }
 #[test]
@@ -1956,50 +2110,56 @@ fn rewrite_summary_record_present_in_dry_run() {
     write(td.path(), "a.rs", "// removed\nfn f() {}\n");
     let out = run_dry(td.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.lines().any(|l| l.starts_with("REWRITE_SUMMARY\t")),
-        "REWRITE_SUMMARY must be emitted in --dry-run too:\n{stderr}"
+    let summary = one_record(&stderr, "rewrite_summary");
+    assert_eq!(
+        summary.text("mode"),
+        "dry-run",
+        "rewrite_summary must be emitted in --dry-run too:\n{stderr}"
     );
 }
 #[test]
-fn existing_summary_record_unchanged_shape() {
+fn strip_summary_is_a_versioned_record_not_a_tab_separated_line() {
     let td = tempfile::tempdir().unwrap();
     write(td.path(), "a.rs", "// removed\nfn f() {}\n");
     let out = run(td.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    let summary = stderr
-        .lines()
-        .find(|l| l.starts_with("SUMMARY\tmode=write\t"))
-        .expect("legacy SUMMARY present");
-    for field in ["rewritten=", "unchanged=", "errors="] {
-        assert!(
-            summary.contains(field),
-            "legacy SUMMARY missing `{field}` field: {summary}"
-        );
-    }
+    let summary = one_record(&stderr, "strip_summary");
+    assert_eq!(summary.text("mode"), "write");
+    assert_eq!(summary.number("rewritten"), 1);
+    assert_eq!(summary.number("unchanged"), 0);
+    assert_eq!(summary.number("errors"), 0);
+    assert!(
+        !stderr.contains("SUMMARY\t"),
+        "the unversioned tab-separated SUMMARY line must be gone:\n{stderr}"
+    );
 }
 #[test]
 fn rewrite_record_grammar_constant_documents_record() {
     let grammar = comment_free::REWRITE_RECORD_GRAMMAR;
     for needle in [
-        "REWRITE_SUMMARY",
-        "comments_removed",
-        "inline_trimmed",
-        "blank_lines_collapsed",
-        "doc_links_rewritten",
-        "safety_preserved",
-        "auto_trait_preserved",
-        "v=<N>",
+        "rewrite_summary",
+        "\"mode\":<MODE>",
+        "\"comments_removed\":<U32>",
+        "\"inline_trimmed\":<U32>",
+        "\"blank_lines_collapsed\":<U32>",
+        "\"doc_links_rewritten\":<U32>",
+        "\"v\":<N>",
     ] {
         assert!(
             grammar.contains(needle),
             "REWRITE_RECORD_GRAMMAR missing `{needle}`:\n{grammar}"
         );
     }
+    for gone in ["safety_preserved", "auto_trait_preserved"] {
+        assert!(
+            !grammar.contains(gone),
+            "REWRITE_RECORD_GRAMMAR must not mention `{gone}`:\n{grammar}"
+        );
+    }
 }
 #[test]
-fn rewrite_record_version_constant_is_one() {
-    assert_eq!(comment_free::REWRITE_RECORD_VERSION, 1);
+fn rewrite_record_version_constant_is_two() {
+    assert_eq!(comment_free::REWRITE_RECORD_VERSION, 2);
 }
 #[test]
 fn version_flag_exits_zero_and_prints_crate_version() {
@@ -2049,11 +2209,12 @@ fn lint_mode_counts_unreadable_directory_as_error_and_exits_5() {
         "unreadable directory must exit 5, not clean:\n{stderr}"
     );
     assert!(
-        stderr.contains("WALK_ERROR") && stderr.contains("locked"),
-        "expected a WALK_ERROR record naming the unreadable path:\n{stderr}"
+        one_error(&stderr, "walk").text("path").contains("locked"),
+        "expected a walk run_error naming the unreadable path:\n{stderr}"
     );
-    assert!(
-        stderr.contains("errors=1"),
+    assert_eq!(
+        one_record(&stderr, "lint_summary").number("errors"),
+        1,
         "expected the run error count to include the walk error:\n{stderr}"
     );
 }
@@ -2079,11 +2240,457 @@ fn doc_scan_counts_unreadable_directory_as_error_and_exits_5() {
         "unreadable documentation-scan directory must exit 5, not clean:\n{stderr}"
     );
     assert!(
-        stderr.contains("WALK_ERROR") && stderr.contains("locked"),
-        "expected a WALK_ERROR record naming the unreadable path:\n{stderr}"
+        one_error(&stderr, "walk").text("path").contains("locked"),
+        "expected a walk run_error naming the unreadable path:\n{stderr}"
     );
-    assert!(
-        stderr.contains("errors=1"),
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("errors"),
+        1,
         "expected the run error count to include the doc-scan walk error:\n{stderr}"
     );
+}
+#[test]
+fn record_survives_a_path_containing_a_tab_and_a_newline() {
+    let td = tempfile::tempdir().unwrap();
+    let src = td.path().join("src");
+    fs::create_dir_all(&src).expect("mkdir src");
+    let name = "we\tird\nname.rs";
+    let doc = "/// w01 w02 w03 w04 w05 w06\npub fn f() {}\n";
+    fs::write(src.join(name), doc).expect("write hostile fixture");
+    let out = run_lint_budget(td.path(), 5);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert!(
+        finding.text("path").ends_with(name),
+        "the tab and newline in the path must round-trip through the record, got {:?}",
+        finding.text("path")
+    );
+    let hint = one_record(&stdout, "doc_lint_hint");
+    assert!(hint.text("path").ends_with(name), "{stdout}");
+}
+
+#[test]
+fn record_survives_an_item_label_containing_a_tab_and_a_newline() {
+    let td = tempfile::tempdir().unwrap();
+    write(
+        td.path(),
+        "a.rs",
+        "/// w01 w02 w03 w04 w05 w06\npub struct S {}\n",
+    );
+    let out = run_lint_budget(td.path(), 5);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let finding = one_record(&stdout, "doc_lint_finding");
+    let item = finding.text("item");
+    assert!(
+        !item.contains('\t') && !item.contains('\n'),
+        "item: {item:?}"
+    );
+    assert!(!item.is_empty(), "{stdout}");
+}
+
+#[test]
+fn every_emitted_record_line_parses_strictly() {
+    let td = tempfile::tempdir().unwrap();
+    write(
+        td.path(),
+        "a.rs",
+        "/// w01 w02 w03 w04 w05 w06\npub fn f() {}\n",
+    );
+    let out = run_lint_budget(td.path(), 5);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        parse_record(line)
+            .unwrap_or_else(|e| panic!("emitted line failed strict parse: {line}\n{e:?}"));
+    }
+}
+
+#[test]
+fn parser_rejects_a_duplicate_field() {
+    let line = "{\"record\":\"doc_lint_truncated\",\"v\":2,\"kind\":\"overlong_doc\",\"kind\":\"other\",\"remaining\":1}";
+    assert_eq!(
+        parse_record(line),
+        Err(RecordError::DuplicateField("kind".to_string())),
+        "a duplicated field must be rejected, never last-value-wins"
+    );
+}
+
+#[test]
+fn parser_rejects_an_unknown_field() {
+    let line = "{\"record\":\"doc_lint_truncated\",\"v\":2,\"kind\":\"overlong_doc\",\"remaining\":1,\"surprise\":3}";
+    assert_eq!(
+        parse_record(line),
+        Err(RecordError::UnknownField("surprise".to_string()))
+    );
+}
+
+#[test]
+fn parser_rejects_an_unknown_record_name() {
+    let line = "{\"record\":\"doc_lint_indeterminate\",\"v\":2}";
+    assert_eq!(
+        parse_record(line),
+        Err(RecordError::UnknownRecord(
+            "doc_lint_indeterminate".to_string()
+        )),
+        "a consumer that does not know a record must say so, not silently drop it"
+    );
+}
+
+#[test]
+fn parser_rejects_a_record_version_it_does_not_understand() {
+    let line =
+        "{\"record\":\"doc_lint_truncated\",\"v\":99,\"kind\":\"overlong_doc\",\"remaining\":1}";
+    assert_eq!(parse_record(line), Err(RecordError::VersionTooNew(99)));
+}
+
+#[test]
+fn parser_rejects_malformed_records() {
+    for line in [
+        "{\"record\":\"doc_lint_truncated\",\"v\":2,\"kind\":\"overlong_doc\",\"remaining\":1",
+        "{\"record\":\"doc_lint_truncated\" \"v\":2}",
+        "{\"record\":\"doc_lint_truncated\",\"v\":}",
+        "{\"record\":\"doc_lint_truncated\",\"v\":2,\"kind\":\"unterminated}",
+        "{\"record\":\"doc_lint_truncated\",\"v\":2,\"kind\":\"overlong_doc\",\"remaining\":1} trailing",
+        "{\"v\":2,\"kind\":\"overlong_doc\",\"remaining\":1}",
+    ] {
+        assert!(
+            matches!(parse_record(line), Err(RecordError::Malformed(_))),
+            "expected a malformed-record rejection for: {line}"
+        );
+    }
+}
+
+#[test]
+fn parser_accepts_the_escapes_the_emitter_produces() {
+    let line = "{\"record\":\"doc_lint_hint\",\"v\":2,\"outcome\":\"finding\",\"kind\":\"overlong_doc\",\"path\":\"a\\tb\\nc\\u0001d\",\"line\":1,\"item\":\"fn f\",\"words\":9,\"budget\":8}";
+    let record = parse_record(line).expect("emitter escapes must round-trip");
+    assert_eq!(record.text("path"), "a\tb\nc\u{1}d");
+}
+
+#[test]
+fn diagnostic_record_version_constant_is_two() {
+    assert_eq!(comment_free::DIAGNOSTIC_RECORD_VERSION, 2);
+}
+
+#[test]
+fn diagnostic_record_grammar_constant_documents_the_family() {
+    let grammar = comment_free::DIAGNOSTIC_RECORD_GRAMMAR;
+    for needle in [
+        "run_error",
+        "doc_file_warning",
+        "rewrite_file",
+        "strip_summary",
+        "lint_summary",
+        "\"v\":<N>",
+        "\"path\":<PATH>",
+    ] {
+        assert!(
+            grammar.contains(needle),
+            "DIAGNOSTIC_RECORD_GRAMMAR missing `{needle}`:\n{grammar}"
+        );
+    }
+}
+
+#[test]
+fn run_error_survives_a_path_containing_a_tab_and_a_newline() {
+    let td = tempfile::tempdir().unwrap();
+    let src = td.path().join("src");
+    fs::create_dir_all(&src).expect("mkdir src");
+    let name = "we\tird\nbroken.rs";
+    fs::write(src.join(name), "fn f( {\n").expect("write hostile fixture");
+    let out = run(td.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let err = one_error(&stderr, "parse");
+    assert!(
+        err.text("path").ends_with(name),
+        "the tab and newline in the path must round-trip through run_error, got {:?}",
+        err.text("path")
+    );
+    assert_eq!(
+        stderr.lines().filter(|l| l.starts_with('{')).count(),
+        3,
+        "a hostile path must not forge extra record lines:\n{stderr}"
+    );
+}
+
+#[test]
+fn rewrite_file_record_survives_a_path_containing_a_tab_and_a_newline() {
+    let td = tempfile::tempdir().unwrap();
+    let src = td.path().join("src");
+    fs::create_dir_all(&src).expect("mkdir src");
+    let name = "we\tird\nname.rs";
+    fs::write(src.join(name), "// kill me\nfn f() {}\n").expect("write hostile fixture");
+    let out = run(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        one_record(&stdout, "rewrite_file")
+            .text("path")
+            .ends_with(name),
+        "rewrite_file must JSON-escape a hostile path:\n{stdout}"
+    );
+}
+
+#[test]
+fn doc_file_warning_survives_a_path_containing_a_tab_and_a_newline() {
+    let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("we\tird\nREADME.md"), "hi\n").expect("write hostile doc");
+    write(td.path(), "a.rs", "fn f() {}\n");
+    let out = run_dry(td.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        one_record(&stderr, "doc_file_warning")
+            .text("path")
+            .ends_with("we\tird\nREADME.md"),
+        "doc_file_warning must JSON-escape a hostile path:\n{stderr}"
+    );
+}
+
+#[test]
+fn every_emitted_strip_mode_diagnostic_parses_strictly() {
+    let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("README.md"), "hi\n").expect("write README");
+    write(td.path(), "a.rs", "// removed\nfn f() {}\n");
+    write(td.path(), "broken.rs", "fn f( {\n");
+    let out = run(td.path());
+    for stream in [
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    ] {
+        for line in stream.lines().filter(|l| l.starts_with('{')) {
+            parse_record(line)
+                .unwrap_or_else(|e| panic!("emitted line failed strict parse: {line}\n{e:?}"));
+        }
+    }
+}
+
+#[test]
+fn dry_run_diff_body_is_plain_text_and_never_a_record_line() {
+    let td = tempfile::tempdir().unwrap();
+    write(
+        td.path(),
+        "a.rs",
+        "// kill me\nfn f() {\n    let x = 1;\n}\n",
+    );
+    let out = run_dry(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--- a/") && stdout.contains("@@"),
+        "the human-facing diff body must stay plain text:\n{stdout}"
+    );
+    let body: Vec<&str> = stdout.lines().filter(|l| !l.starts_with('{')).collect();
+    assert!(
+        !body.is_empty(),
+        "expected a plain-text diff body alongside the records:\n{stdout}"
+    );
+    for line in &body {
+        assert!(
+            line.is_empty() || matches!(line.as_bytes()[0], b' ' | b'-' | b'+' | b'@'),
+            "every diff body line is prefixed, so it can never be mistaken for a record: {line:?}"
+        );
+    }
+    for line in stdout.lines().filter(|l| l.starts_with('{')) {
+        parse_record(line)
+            .unwrap_or_else(|e| panic!("record line failed strict parse: {line}\n{e:?}"));
+    }
+}
+
+#[test]
+fn dry_run_diff_body_prefixes_an_inserted_line_that_opens_with_a_brace() {
+    let td = tempfile::tempdir().unwrap();
+    write(
+        td.path(),
+        "a.rs",
+        "fn f() -> i32 {\n    let x =\n{ 1 }; // kill me\n    x\n}\n",
+    );
+    let out = run_dry(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("+{ 1 };"),
+        "an inserted source line opening with `{{` must carry its `+` prefix, \
+         or it is indistinguishable from a record line:\n{stdout}"
+    );
+    for line in stdout.lines().filter(|l| l.starts_with('{')) {
+        parse_record(line)
+            .unwrap_or_else(|e| panic!("record line failed strict parse: {line}\n{e:?}"));
+    }
+}
+
+#[test]
+fn parser_rejects_a_duplicate_field_on_a_diagnostic_record() {
+    let line = "{\"record\":\"run_error\",\"v\":2,\"kind\":\"walk\",\"path\":\"a\",\"path\":\"b\",\"message\":\"m\"}";
+    assert_eq!(
+        parse_record(line),
+        Err(RecordError::DuplicateField("path".to_string())),
+        "the newly versioned diagnostics get the same strict treatment"
+    );
+}
+
+#[test]
+fn parser_rejects_an_unknown_field_on_a_diagnostic_record() {
+    let line = "{\"record\":\"strip_summary\",\"v\":2,\"mode\":\"write\",\"rewritten\":1,\"unchanged\":0,\"errors\":0,\"surprise\":1}";
+    assert_eq!(
+        parse_record(line),
+        Err(RecordError::UnknownField("surprise".to_string()))
+    );
+}
+
+#[test]
+fn parser_rejects_a_malformed_diagnostic_record() {
+    for line in [
+        "{\"record\":\"lint_summary\",\"v\":2,\"files\":1,\"findings\":0,\"errors\":0",
+        "{\"record\":\"doc_file_warning\",\"v\":2,\"path\":\"unterminated}",
+        "{\"record\":\"rewrite_file\",\"v\":2,\"mode\":\"write\",\"path\":}",
+    ] {
+        assert!(
+            matches!(parse_record(line), Err(RecordError::Malformed(_))),
+            "expected a malformed-record rejection for: {line}"
+        );
+    }
+}
+
+const FORGED: &str = "{\"record\":\"forged\",\"v\":2}";
+
+fn hostile_root_name() -> String {
+    format!("hostile\n{FORGED}")
+}
+
+fn assert_no_forged_record_line(stream: &str, label: &str) {
+    for line in stream.lines().filter(|l| l.starts_with('{')) {
+        assert!(
+            parse_record(line).is_ok(),
+            "a hostile ROOT forged a record line on {label}: {line}\n\
+             full stream:\n{stream}"
+        );
+    }
+}
+
+#[test]
+fn a_hostile_root_cannot_forge_a_record_through_the_doc_file_prose_warning() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join(hostile_root_name());
+    fs::create_dir_all(&root).expect("mkdir hostile root");
+    fs::write(root.join("README.md"), "hi\n").expect("write doc file");
+    write(&root, "a.rs", "fn f() {}\n");
+    let out = run(&root);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_no_forged_record_line(&stderr, "stderr");
+}
+
+#[test]
+fn a_hostile_root_cannot_forge_a_record_through_the_dry_run_diff_header() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join(hostile_root_name());
+    fs::create_dir_all(&root).expect("mkdir hostile root");
+    write(&root, "a.rs", "// kill me\nfn f() {}\n");
+    let out = run_dry(&root);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_no_forged_record_line(&stdout, "stdout");
+}
+
+#[test]
+fn a_hostile_root_cannot_forge_a_record_through_the_fatal_error_line() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join(hostile_root_name()).join("absent");
+    let out = run(&root);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "ROOT is not a directory");
+    assert_no_forged_record_line(&stderr, "stderr");
+}
+
+fn run_argv(args: &[&str]) -> std::process::Output {
+    Command::new(bin())
+        .args(args)
+        .output()
+        .expect("failed to spawn comment-free")
+}
+
+fn hostile_argv_fragment() -> String {
+    format!("hostile\n{FORGED}\n")
+}
+
+#[test]
+fn a_hostile_option_looking_root_cannot_forge_a_record_through_clap() {
+    let arg = format!("--{}", hostile_argv_fragment());
+    let out = run_argv(&[&arg]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "invalid argv exits 2");
+    assert_no_forged_record_line(&stderr, "stderr");
+    assert_no_forged_record_line(&stdout, "stdout");
+}
+
+#[test]
+fn a_hostile_option_value_cannot_forge_a_record_through_clap() {
+    let value = hostile_argv_fragment();
+    let out = run_argv(&["--doc-max-words", &value]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "invalid argv exits 2");
+    assert_no_forged_record_line(&stderr, "stderr");
+    assert_no_forged_record_line(&stdout, "stdout");
+}
+
+#[test]
+fn a_hostile_positional_root_cannot_forge_a_record_through_clap() {
+    let out = run_argv(&["--dry-run", &hostile_argv_fragment()]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "invalid argv exits 2");
+    assert_no_forged_record_line(&stderr, "stderr");
+}
+
+#[test]
+fn control_bearing_argv_is_rejected_with_static_prose_only() {
+    let arg = format!("--{}", hostile_argv_fragment());
+    let out = run_argv(&[&arg]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains(FORGED),
+        "clap diagnostics must not echo control-bearing argv at all:\n{stderr}"
+    );
+    assert_eq!(
+        stderr.lines().count(),
+        1,
+        "one static prose line:\n{stderr}"
+    );
+}
+
+#[test]
+fn a_control_free_argv_error_still_renders_a_clap_diagnostic() {
+    let out = run_argv(&["--no-such-flag"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "invalid argv exits 2");
+    assert!(
+        stderr.contains("--no-such-flag"),
+        "control-free argv keeps clap's normal diagnostic:\n{stderr}"
+    );
+    assert_no_forged_record_line(&stderr, "stderr");
+}
+
+#[test]
+fn help_and_version_emit_no_column_zero_record_lines() {
+    for flags in [["--help"], ["--version"]] {
+        let out = run_argv(&flags);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_no_forged_record_line(&stdout, "stdout");
+    }
+}
+
+#[test]
+fn single_line_collapses_hostile_prose_to_one_line() {
+    let hostile = format!("io error: bad thing\n{FORGED}\r\ttail\u{7f}\u{1}");
+    let rendered = comment_free::single_line(&hostile);
+    assert_eq!(rendered.lines().count(), 1, "one line: {rendered}");
+    assert!(!rendered.contains('\n'), "no raw LF: {rendered}");
+    assert!(!rendered.contains('\r'), "no raw CR: {rendered}");
+    assert!(!rendered.contains('\u{7f}'), "no DEL: {rendered}");
+    assert!(rendered.contains("\\u0001"), "C0 escaped: {rendered}");
+    assert!(
+        !rendered.starts_with('{'),
+        "never column-zero record: {rendered}"
+    );
+}
+
+#[test]
+fn parser_rejects_a_diagnostic_record_version_it_does_not_understand() {
+    let line = "{\"record\":\"lint_summary\",\"v\":99,\"files\":1,\"findings\":0,\"errors\":0}";
+    assert_eq!(parse_record(line), Err(RecordError::VersionTooNew(99)));
 }

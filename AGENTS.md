@@ -12,8 +12,11 @@ length; `--rewrite` strips non-doc comments and canonicalises rustdoc
 link idioms in place. See `README.md` for modes and exit codes.
 
 This tool is the mechanical enforcement surface for the fleet house
-rule "no non-doc comments in Rust source". It preserves doc comments,
-`// SAFETY:` lines, and `AUTO-TRAIT-POLICY-*` markers.
+rule "no non-doc comments in Rust source". It preserves doc comments and
+nothing else: there is no `// SAFETY:` carve-out and no marker allowlist.
+
+Machine-readable lint and rewrite records are JSON Lines; the grammar and
+its compatibility rules live in `docs/record-format.md`.
 
 ## Build / test / lint
 

@@ -197,16 +197,22 @@ pub enum CommentFreeError {
 /// errors. [`WalkError::path`] is the entry that failed, falling back
 /// to the walk root when the underlying error carries none.
 ///
-/// The underlying [`walkdir`] error stays the [`std::error::Error`]
-/// source but is not nameable here; take [`WalkError::message`] for its
-/// text.
+/// The underlying traversal failure is rendered once, at construction,
+/// into an owned neutral source: no foreign error type is reachable
+/// from this error's [`std::error::Error::source`] chain. Take
+/// [`WalkError::message`] for its text.
 #[derive(Debug, thiserror::Error)]
 #[error("cannot traverse {}: {source}", path.display())]
 pub struct WalkError {
     path: PathBuf,
     #[source]
-    source: walkdir::Error,
+    source: TraversalFailure,
 }
+/// The rendered text of a traversal failure, owned and detached from
+/// the walker that produced it.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct TraversalFailure(String);
 impl WalkError {
     /// The entry that could not be traversed.
     #[must_use]
@@ -217,11 +223,14 @@ impl WalkError {
     /// text, for the `message` field of a `run_error` record.
     #[must_use]
     pub fn message(&self) -> String {
-        self.source.to_string()
+        self.source.0.clone()
     }
-    fn rooted_at(base: &Path, source: walkdir::Error) -> Self {
+    fn rooted_at(base: &Path, source: &walkdir::Error) -> Self {
         let path = source.path().unwrap_or(base).to_path_buf();
-        Self { path, source }
+        Self {
+            path,
+            source: TraversalFailure(source.to_string()),
+        }
     }
 }
 impl From<&CommentFreeError> for ExitCode {
@@ -1310,7 +1319,7 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
         });
     for entry in walker {
         match entry {
-            Err(e) => scan.errors.push(WalkError::rooted_at(root, e)),
+            Err(e) => scan.errors.push(WalkError::rooted_at(root, &e)),
             Ok(entry) if entry.file_type().is_file() && is_doc_path(entry.path(), root) => {
                 scan.files.push(entry.into_path());
             }
@@ -1370,7 +1379,7 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
                 true
             })
             .filter_map(move |entry| match entry {
-                Err(e) => Some(Err(WalkError::rooted_at(&base, e))),
+                Err(e) => Some(Err(WalkError::rooted_at(&base, &e))),
                 Ok(e) if e.file_type().is_file() => {
                     let path = e.into_path();
                     (path.extension().and_then(|s| s.to_str()) == Some("rs")).then_some(Ok(path))
@@ -1761,6 +1770,36 @@ fn impl_item_label_and_attrs(item: &syn::ImplItem) -> Option<(String, &[Attribut
         _ => return None,
     };
     Some((label, attrs, line))
+}
+#[cfg(test)]
+mod walk_error_tests {
+    use super::walk_rs_files;
+    use std::error::Error as _;
+    use std::path::Path;
+    fn a_walk_error() -> super::WalkError {
+        walk_rs_files(Path::new("/comment-free-no-such-root/src"))
+            .next()
+            .expect("an unreadable root yields one traversal failure")
+            .expect_err("the entry cannot be traversed")
+    }
+    #[test]
+    fn the_error_chain_does_not_leak_the_walker_error_type() {
+        let err = a_walk_error();
+        let source = err.source().expect("a walk error carries its source");
+        assert!(
+            source.downcast_ref::<walkdir::Error>().is_none(),
+            "walkdir::Error is reachable through WalkError::source"
+        );
+    }
+    #[test]
+    fn the_rendered_message_survives_the_seal() {
+        let err = a_walk_error();
+        assert!(!err.message().is_empty());
+        assert!(
+            err.to_string().contains(&err.message()),
+            "display drops the source text: {err}"
+        );
+    }
 }
 #[cfg(test)]
 mod atomic_write_tests {

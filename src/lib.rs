@@ -2575,7 +2575,9 @@ mod process_file_tests {
 #[cfg(test)]
 mod doc_lint_tests {
     use super::{DocBudget, doc_lint_file};
-    use syn::parse_quote;
+    fn file(src: &str) -> syn::File {
+        syn::parse_file(src).expect("doc-lint fixture must parse as Rust source")
+    }
     fn lint(file: &syn::File, max_words: usize) -> Vec<super::DocFinding> {
         doc_lint_file(file, DocBudget { max_words })
             .findings()
@@ -2586,27 +2588,33 @@ mod doc_lint_tests {
     }
     #[test]
     fn no_docs_yields_no_findings() {
-        let f: syn::File = parse_quote! {
-            pub fn foo() {}
-        };
+        let f = file(
+            r"
+pub fn foo() {}
+        ",
+        );
         assert!(lint(&f, 40).is_empty());
     }
     #[test]
     fn short_doc_under_budget_yields_no_findings() {
-        let f: syn::File = parse_quote! {
-            #[doc = " one two three four five"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " one two three four five"] pub fn foo() {}
+        "#,
+        );
         assert!(lint(&f, 40).is_empty());
     }
     #[test]
     fn long_doc_over_budget_yields_one_finding() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
-            " w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
-            " w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
-            " w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
-            " w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
+" w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
+" w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
+" w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
+" w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] pub fn foo() {}
+        "#,
+        );
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].words.count(), 50);
@@ -2615,33 +2623,39 @@ mod doc_lint_tests {
     }
     #[test]
     fn fenced_code_excluded_brings_under_budget() {
-        let f: syn::File = parse_quote! {
-            #[doc = " p01 p02 p03 p04 p05 p06 p07 p08 p09 p10"] #[doc = " ```"] #[doc =
-            " c01 c02 c03 c04 c05 c06 c07 c08 c09 c10"] #[doc =
-            " c11 c12 c13 c14 c15 c16 c17 c18 c19 c20"] #[doc =
-            " c21 c22 c23 c24 c25 c26 c27 c28 c29 c30"] #[doc =
-            " c31 c32 c33 c34 c35 c36 c37 c38 c39 c40"] #[doc =
-            " c41 c42 c43 c44 c45 c46 c47 c48 c49 c50"] #[doc = " ```"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " p01 p02 p03 p04 p05 p06 p07 p08 p09 p10"] #[doc = " ```"] #[doc =
+" c01 c02 c03 c04 c05 c06 c07 c08 c09 c10"] #[doc =
+" c11 c12 c13 c14 c15 c16 c17 c18 c19 c20"] #[doc =
+" c21 c22 c23 c24 c25 c26 c27 c28 c29 c30"] #[doc =
+" c31 c32 c33 c34 c35 c36 c37 c38 c39 c40"] #[doc =
+" c41 c42 c43 c44 c45 c46 c47 c48 c49 c50"] #[doc = " ```"] pub fn foo() {}
+        "#,
+        );
         let findings = lint(&f, 40);
         assert!(findings.is_empty(), "{findings:?}");
     }
     #[test]
     fn multi_attr_docs_concatenate() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05"] #[doc = " w06 w07 w08 w09 w10"] #[doc =
-            "w11 w12 w13 w14 w15"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05"] #[doc = " w06 w07 w08 w09 w10"] #[doc =
+"w11 w12 w13 w14 w15"] pub fn foo() {}
+        "#,
+        );
         let findings = lint(&f, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].words.count(), 15);
     }
     #[test]
     fn cfg_attr_doc_payload_counted_towards_the_undecided_upper_bound() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05"] #[cfg_attr(test, doc =
-            "w06 w07 w08 w09 w10")] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05"] #[cfg_attr(test, doc =
+"w06 w07 w08 w09 w10")] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 7);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert_eq!(r.undecided().len(), 1);
@@ -2654,10 +2668,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn mutually_exclusive_cfg_docs_are_not_summed_into_a_finding() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(unix, doc = " w01 w02 w03 w04 w05 w06")] #[cfg_attr(windows, doc =
-            " w07 w08 w09 w10 w11 w12")] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(unix, doc = " w01 w02 w03 w04 w05 w06")] #[cfg_attr(windows, doc =
+" w07 w08 w09 w10 w11 w12")] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
@@ -2667,10 +2683,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn unconditional_docs_over_budget_stay_a_finding_beside_cfg_docs() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix, doc =
-            " w11 w12 w13")] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix, doc =
+" w11 w12 w13")] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1);
@@ -2682,10 +2700,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn cfg_docs_within_the_aggregate_budget_are_undecided_not_clean() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02"] #[cfg_attr(unix, doc = " w03 w04")] #[cfg_attr(windows, doc =
-            " w05 w06")] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02"] #[cfg_attr(unix, doc = " w03 w04")] #[cfg_attr(windows, doc =
+" w05 w06")] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 6);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert_eq!(
@@ -2697,11 +2717,13 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_conditional_fence_hiding_unconditional_prose_is_undecided() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(unix, doc = " ```")] #[doc =
-            " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix, doc = " ```")]
-            pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(unix, doc = " ```")] #[doc =
+" w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix, doc = " ```")]
+pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert_eq!(
@@ -2713,10 +2735,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn nested_cfg_attr_doc_payload_is_not_invisible() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(unix, cfg_attr(windows, doc =
-            " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"))] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(unix, cfg_attr(windows, doc =
+" w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"))] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert_eq!(
@@ -2729,10 +2753,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_trivially_true_cfg_attr_doc_is_a_finding() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(all(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
-            pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(all(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
@@ -2740,10 +2766,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_nested_trivially_true_cfg_attr_doc_is_a_finding() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(all(), cfg_attr(all(), doc =
-            " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"))] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(all(), cfg_attr(all(), doc =
+" w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"))] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
@@ -2751,21 +2779,25 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_trivially_false_cfg_attr_doc_carries_no_words() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(any(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
-            pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(any(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
     }
     #[test]
     fn boolean_constant_predicates_fold_through_not_and_nesting() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(not(any()), doc = " w01 w02 w03 w04 w05")] #[cfg_attr(any(all(), unix),
-            doc = " w06 w07 w08 w09 w10")] #[cfg_attr(all(any(), unix), doc =
-            " x01 x02 x03 x04 x05 x06 x07 x08 x09 x10")] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(not(any()), doc = " w01 w02 w03 w04 w05")] #[cfg_attr(any(all(), unix),
+doc = " w06 w07 w08 w09 w10")] #[cfg_attr(all(any(), unix), doc =
+" x01 x02 x03 x04 x05 x06 x07 x08 x09 x10")] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
@@ -2773,10 +2805,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_literal_true_cfg_attr_doc_is_a_finding() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(true, doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
-            pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(true, doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
@@ -2784,22 +2818,26 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_literal_false_cfg_attr_doc_carries_no_words() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(false, doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
-            pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(false, doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
     }
     #[test]
     fn literal_boolean_predicates_fold_through_all_any_and_not() {
-        let f: syn::File = parse_quote! {
-            #[cfg_attr(all(true), doc = " w01 w02 w03 w04 w05")] #[cfg_attr(any(true, unix),
-            doc = " w06 w07 w08 w09 w10")] #[cfg_attr(not(false), cfg_attr(true, doc =
-            " x01 x02 x03 x04 x05"))] #[cfg_attr(any(false), doc =
-            " y01 y02 y03 y04 y05 y06 y07 y08 y09 y10")] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[cfg_attr(all(true), doc = " w01 w02 w03 w04 w05")] #[cfg_attr(any(true, unix),
+doc = " w06 w07 w08 w09 w10")] #[cfg_attr(not(false), cfg_attr(true, doc =
+" x01 x02 x03 x04 x05"))] #[cfg_attr(any(false), doc =
+" y01 y02 y03 y04 y05 y06 y07 y08 y09 y10")] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
@@ -2807,9 +2845,11 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_file_level_trivially_true_cfg_attr_doc_is_a_finding() {
-        let f: syn::File = parse_quote! {
-            #![cfg_attr(all(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
-        };
+        let f = file(
+            r#"
+#![cfg_attr(all(), doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10")]
+        "#,
+        );
         let r = report(&f, 8);
         assert!(r.undecided().is_empty(), "{:?}", r.undecided());
         assert_eq!(r.findings().len(), 1, "{:?}", r.findings());
@@ -2817,10 +2857,12 @@ mod doc_lint_tests {
     }
     #[test]
     fn a_fence_split_across_a_cfg_boundary_is_undecided_not_a_finding() {
-        let f: syn::File = parse_quote! {
-            #[doc = " ```"] #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix,
-            doc = " ```")] #[doc = " w11 w12 w13 w14 w15"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " ```"] #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[cfg_attr(unix,
+doc = " ```")] #[doc = " w11 w12 w13 w14 w15"] pub fn foo() {}
+        "#,
+        );
         let r = report(&f, 3);
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
@@ -2828,30 +2870,36 @@ mod doc_lint_tests {
     }
     #[test]
     fn doc_inside_macro_rules_not_linted() {
-        let f: syn::File = parse_quote! {
-            macro_rules! noisy { () => { #[doc =
-            " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
-            " w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
-            " w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
-            " w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
-            " w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] pub fn inner() {} }; }
-        };
+        let f = file(
+            r#"
+macro_rules! noisy { () => { #[doc =
+" w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
+" w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
+" w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
+" w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
+" w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] pub fn inner() {} }; }
+        "#,
+        );
         let findings = lint(&f, 5);
         assert!(findings.is_empty(), "{findings:?}");
     }
     #[test]
     fn field_and_variant_docs_linted_independently() {
-        let f: syn::File = parse_quote! {
-            pub struct S { #[doc = " w01 w02 w03 w04 w05"] pub a : u32, #[doc =
-            " w01 w02 w03 w04 w05 w06"] pub b : u32, }
-        };
+        let f = file(
+            r#"
+pub struct S { #[doc = " w01 w02 w03 w04 w05"] pub a : u32, #[doc =
+" w01 w02 w03 w04 w05 w06"] pub b : u32, }
+        "#,
+        );
         let findings = lint(&f, 3);
         assert_eq!(findings.len(), 2, "{findings:?}");
         assert!(findings.iter().all(|f| f.item_label.starts_with("field ")));
-        let f: syn::File = parse_quote! {
-            pub enum E { #[doc = " w01 w02 w03 w04 w05"] One, #[doc =
-            " w01 w02 w03 w04 w05 w06"] Two, }
-        };
+        let f = file(
+            r#"
+pub enum E { #[doc = " w01 w02 w03 w04 w05"] One, #[doc =
+" w01 w02 w03 w04 w05 w06"] Two, }
+        "#,
+        );
         let findings = lint(&f, 3);
         assert_eq!(findings.len(), 2, "{findings:?}");
         assert!(
@@ -2862,44 +2910,52 @@ mod doc_lint_tests {
     }
     #[test]
     fn closing_fence_returns_to_prose() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05"] #[doc = " ```"] #[doc = " c01 c02 c03"] #[doc
-            = " ```"] #[doc = " w06 w07 w08 w09 w10 w11"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05"] #[doc = " ```"] #[doc = " c01 c02 c03"] #[doc
+= " ```"] #[doc = " w06 w07 w08 w09 w10 w11"] pub fn foo() {}
+        "#,
+        );
         let findings = lint(&f, 10);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].words.count(), 11);
     }
     #[test]
     fn equal_to_budget_does_not_trigger() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05"] pub fn foo() {}
+        "#,
+        );
         assert!(lint(&f, 5).is_empty());
     }
     #[test]
     fn tilde_fence_excludes_code() {
-        let f: syn::File = parse_quote! {
-            #[doc = " p01 p02 p03 p04 p05 p06 p07 p08 p09 p10"] #[doc = " ~~~"] #[doc =
-            " c01 c02 c03 c04 c05 c06 c07 c08 c09 c10"] #[doc =
-            " c11 c12 c13 c14 c15 c16 c17 c18 c19 c20"] #[doc =
-            " c21 c22 c23 c24 c25 c26 c27 c28 c29 c30"] #[doc =
-            " c31 c32 c33 c34 c35 c36 c37 c38 c39 c40"] #[doc =
-            " c41 c42 c43 c44 c45 c46 c47 c48 c49 c50"] #[doc = " ~~~"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " p01 p02 p03 p04 p05 p06 p07 p08 p09 p10"] #[doc = " ~~~"] #[doc =
+" c01 c02 c03 c04 c05 c06 c07 c08 c09 c10"] #[doc =
+" c11 c12 c13 c14 c15 c16 c17 c18 c19 c20"] #[doc =
+" c21 c22 c23 c24 c25 c26 c27 c28 c29 c30"] #[doc =
+" c31 c32 c33 c34 c35 c36 c37 c38 c39 c40"] #[doc =
+" c41 c42 c43 c44 c45 c46 c47 c48 c49 c50"] #[doc = " ~~~"] pub fn foo() {}
+        "#,
+        );
         let findings = lint(&f, 40);
         assert!(findings.is_empty(), "{findings:?}");
     }
     #[test]
     fn unclosed_fence_fails_closed() {
-        let f: syn::File = parse_quote! {
-            #[doc = " p01 p02 p03 p04 p05"] #[doc = " ```"] #[doc =
-            " c01 c02 c03 c04 c05 c06 c07 c08 c09 c10"] #[doc =
-            " c11 c12 c13 c14 c15 c16 c17 c18 c19 c20"] #[doc =
-            " c21 c22 c23 c24 c25 c26 c27 c28 c29 c30"] #[doc =
-            " c31 c32 c33 c34 c35 c36 c37 c38 c39 c40"] #[doc =
-            " c41 c42 c43 c44 c45 c46 c47 c48 c49 c50"] pub fn foo() {}
-        };
+        let f = file(
+            r#"
+#[doc = " p01 p02 p03 p04 p05"] #[doc = " ```"] #[doc =
+" c01 c02 c03 c04 c05 c06 c07 c08 c09 c10"] #[doc =
+" c11 c12 c13 c14 c15 c16 c17 c18 c19 c20"] #[doc =
+" c21 c22 c23 c24 c25 c26 c27 c28 c29 c30"] #[doc =
+" c31 c32 c33 c34 c35 c36 c37 c38 c39 c40"] #[doc =
+" c41 c42 c43 c44 c45 c46 c47 c48 c49 c50"] pub fn foo() {}
+        "#,
+        );
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].words.count(), 56);
@@ -2911,13 +2967,15 @@ mod doc_lint_tests {
     }
     #[test]
     fn over_budget_doc_on_pub_use_is_linted() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
-            " w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
-            " w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
-            " w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
-            " w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] pub use crate ::foo::Bar;
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
+" w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
+" w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
+" w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
+" w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] pub use crate ::foo::Bar;
+        "#,
+        );
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].item_label, "use");
@@ -2925,13 +2983,15 @@ mod doc_lint_tests {
     }
     #[test]
     fn over_budget_doc_on_extern_crate_is_linted() {
-        let f: syn::File = parse_quote! {
-            #[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
-            " w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
-            " w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
-            " w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
-            " w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] extern crate alloc;
-        };
+        let f = file(
+            r#"
+#[doc = " w01 w02 w03 w04 w05 w06 w07 w08 w09 w10"] #[doc =
+" w11 w12 w13 w14 w15 w16 w17 w18 w19 w20"] #[doc =
+" w21 w22 w23 w24 w25 w26 w27 w28 w29 w30"] #[doc =
+" w31 w32 w33 w34 w35 w36 w37 w38 w39 w40"] #[doc =
+" w41 w42 w43 w44 w45 w46 w47 w48 w49 w50"] extern crate alloc;
+        "#,
+        );
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].item_label, "extern crate alloc");

@@ -1315,7 +1315,8 @@ impl DocScan {
 /// together with every traversal failure.
 ///
 /// Skips dotfiles/dotdirs, `target/`, and common vendor/build directories
-/// (`node_modules`, `vendor`, `dist`, `build`) to avoid polyglot-repo noise.
+/// (`node_modules`, `vendor`, `dist`, `build`) to avoid polyglot-repo
+/// noise, whatever case those directories are spelled in.
 /// Unreadable entries are reported in [`DocScan::errors`], never dropped.
 #[must_use]
 pub fn scan_doc_files(root: &Path) -> DocScan {
@@ -1338,9 +1339,21 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
     }
     scan
 }
-const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
 mod prune {
-    use super::SKIP_DIRS;
+    use std::ffi::OsStr;
+    const BUILD_OUTPUT_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
+    struct FoldedName(String);
+    impl FoldedName {
+        fn of(name: &OsStr) -> Self {
+            Self(name.to_string_lossy().to_ascii_lowercase())
+        }
+        fn is_hidden(&self) -> bool {
+            self.0.starts_with('.')
+        }
+        fn is_build_output(&self) -> bool {
+            BUILD_OUTPUT_DIRS.contains(&self.0.as_str())
+        }
+    }
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) enum Traversal {
         Prune,
@@ -1365,12 +1378,45 @@ mod prune {
         }
     }
     pub(super) fn traversal(entry: &walkdir::DirEntry, pruned: Pruned) -> Traversal {
-        let name = entry.file_name().to_string_lossy();
+        let name = FoldedName::of(entry.file_name());
         let prunable = entry.depth() > 0 && pruned.covers(entry.file_type());
-        if prunable && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref())) {
+        if prunable && (name.is_hidden() || name.is_build_output()) {
             Traversal::Prune
         } else {
             Traversal::Descend
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::{BUILD_OUTPUT_DIRS, FoldedName};
+        use std::ffi::OsStr;
+        #[test]
+        fn every_build_output_literal_is_already_folded() {
+            for known in BUILD_OUTPUT_DIRS {
+                assert_eq!(
+                    *known,
+                    known.to_ascii_lowercase(),
+                    "a build-output literal that is not already folded can never match a folded name"
+                );
+            }
+        }
+        #[test]
+        fn a_build_output_name_is_recognised_in_every_case_variant() {
+            for spelling in ["target", "Target", "TARGET", "tArGeT"] {
+                assert!(
+                    FoldedName::of(OsStr::new(spelling)).is_build_output(),
+                    "{spelling} must be recognised as build output"
+                );
+            }
+        }
+        #[test]
+        fn folding_does_not_widen_the_build_output_set() {
+            for spelling in ["targets", "src", "targe", "buildx", "distinct"] {
+                assert!(
+                    !FoldedName::of(OsStr::new(spelling)).is_build_output(),
+                    "{spelling} must not be treated as build output"
+                );
+            }
         }
     }
 }
@@ -1518,7 +1564,7 @@ fn walked_link(path: &Path) -> Option<Result<PathBuf, WalkError>> {
 /// are. An ancestor merely *spelled* `src` never widens traversal.
 /// Anything unresolvable, and any unfollowed link that could hide
 /// source, surfaces as a [`WalkError`], never as scope. Build output is
-/// pruned.
+/// pruned case-insensitively.
 pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
     let (bases, undecided) = match resolve_walk_roots(root) {
         Ok(bases) => (bases, None),

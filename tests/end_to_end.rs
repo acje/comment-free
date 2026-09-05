@@ -749,6 +749,98 @@ fn scan_doc_files_skips_vendor_dirs() {
     }
 }
 #[test]
+fn build_output_dirs_are_pruned_in_every_case_variant() {
+    let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("Cargo.toml"), "[package]\nname = \"p\"\n").expect("write manifest");
+    std::fs::create_dir_all(td.path().join("src")).expect("mkdir src");
+    write(td.path().join("src").as_path(), "lib.rs", "fn f() {}\n");
+    for variant in [
+        "Target",
+        "TARGET",
+        "Node_Modules",
+        "Dist",
+        "BUILD",
+        "Vendor",
+    ] {
+        let dir = td.path().join("src").join(variant);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("gen.rs"), "// generated\nfn g() {}\n").expect("write");
+    }
+    let out = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(".")
+        .current_dir(td.path())
+        .output()
+        .expect("failed to spawn comment-free");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        records_named(&stdout, "rewrite_file").is_empty(),
+        "a build-output directory spelled in a different case was traversed and rewritten:\n{stdout}"
+    );
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("rewritten"),
+        0,
+        "expected nothing rewritten:\n{stderr}"
+    );
+}
+#[test]
+fn scan_doc_files_skips_vendor_dirs_in_every_case_variant() {
+    let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("README.md"), "root\n").expect("write README");
+    for sub in ["Node_Modules", "Vendor", "Dist", "BUILD", "Target"] {
+        std::fs::create_dir_all(td.path().join(sub)).expect("mkdir");
+        std::fs::write(td.path().join(sub).join("GUIDE.md"), "nested\n").expect("write");
+    }
+    write(td.path(), "a.rs", "fn f() {}\n");
+    let out = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(".")
+        .current_dir(td.path())
+        .output()
+        .expect("failed to spawn comment-free");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let warned = records_named(&stderr, "doc_file_warning");
+    assert_eq!(
+        warned.len(),
+        1,
+        "expected exactly 1 doc_file_warning (root README.md):\n{stderr}"
+    );
+    assert!(
+        !warned[0].text("path").contains("GUIDE"),
+        "doc scan descended into a build directory spelled in a different case:\n{stderr}"
+    );
+}
+#[test]
+fn a_rust_file_named_in_a_different_case_is_not_rewritten() {
+    let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("Cargo.toml"), "[package]\nname = \"p\"\n").expect("write manifest");
+    std::fs::create_dir_all(td.path().join("src")).expect("mkdir src");
+    let src = td.path().join("src");
+    std::fs::write(src.join("lib.rs"), "fn f() {}\n").expect("write");
+    std::fs::write(src.join("Notes.RS"), "// not compiled\nfn g() {}\n").expect("write");
+    let out = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(".")
+        .current_dir(td.path())
+        .output()
+        .expect("failed to spawn comment-free");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        records_named(&stdout, "rewrite_file").is_empty(),
+        "a file whose extension is not exactly `rs` was rewritten:\n{stdout}"
+    );
+    assert_eq!(
+        one_record(&stderr, "strip_summary").number("rewritten"),
+        0,
+        "expected nothing rewritten:\n{stderr}"
+    );
+}
+#[test]
 fn dry_run_without_rewrite_is_rejected() {
     let td = tempfile::tempdir().unwrap();
     write(td.path(), "a.rs", "fn f() {}\n");

@@ -1284,6 +1284,92 @@ fn lint_over_budget_emits_header_once_then_hint() {
     );
 }
 
+fn doc_prose_lines(count: usize) -> String {
+    let mut out = String::new();
+    for i in 1..=count {
+        out.push_str("/// w");
+        out.push_str(&i.to_string());
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn a_doc_under_budget_only_because_of_code_spans_is_clean() {
+    let td = tempfile::tempdir().unwrap();
+    let mut doc = doc_prose_lines(70);
+    doc.push_str("/// `c01` `c02` `c03` `c04` `c05` `c06` `c07` `c08`\n");
+    doc.push_str("/// `c09` `c10` `c11` `c12` `c13` `c14` `c15`\n");
+    doc.push_str("pub fn f() {}\n");
+    write(td.path(), "a.rs", &doc);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        records_named(&stdout, "doc_lint_finding").is_empty(),
+        "85 tokens but 70 prose words is clean:\n{stdout}"
+    );
+    assert_eq!(one_record(&stderr, "lint_summary").number("findings"), 0);
+    assert_eq!(out.status.code(), Some(0), "clean tree exits 0:\n{stderr}");
+}
+
+#[test]
+fn code_spans_do_not_buy_a_doc_past_the_budget() {
+    let td = tempfile::tempdir().unwrap();
+    let mut doc = doc_prose_lines(81);
+    doc.push_str("/// `c01` `c02` `c03` `c04` `c05`\n");
+    doc.push_str("pub fn f() {}\n");
+    write(td.path(), "a.rs", &doc);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(
+        finding.number("words"),
+        81,
+        "spans are excluded, genuine prose is not:\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(4));
+}
+
+#[test]
+fn a_doc_under_budget_only_because_of_an_indented_code_block_is_clean() {
+    let td = tempfile::tempdir().unwrap();
+    let mut doc = doc_prose_lines(70);
+    doc.push_str("///\n");
+    doc.push_str("///     let sample = one_two_three(alpha, beta, gamma);\n");
+    doc.push_str("///     let other = four_five_six(delta, epsilon, zeta);\n");
+    doc.push_str("///     let third = seven_eight_nine(eta, theta, iota);\n");
+    doc.push_str("pub fn f() {}\n");
+    write(td.path(), "a.rs", &doc);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        records_named(&stdout, "doc_lint_finding").is_empty(),
+        "an indented code block is code, not prose:\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(0), "clean tree exits 0:\n{stderr}");
+}
+
+#[test]
+fn an_indented_code_block_does_not_buy_a_doc_past_the_budget() {
+    let td = tempfile::tempdir().unwrap();
+    let mut doc = doc_prose_lines(85);
+    doc.push_str("///\n");
+    doc.push_str("///     let sample = one_two_three(alpha, beta, gamma);\n");
+    doc.push_str("pub fn f() {}\n");
+    write(td.path(), "a.rs", &doc);
+    let out = run_lint(td.path());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let finding = one_record(&stdout, "doc_lint_finding");
+    assert_eq!(
+        finding.number("words"),
+        85,
+        "indented code is excluded, genuine prose is not:\n{stdout}"
+    );
+    assert_eq!(out.status.code(), Some(4));
+}
+
 #[test]
 fn lint_header_emitted_once_for_many_findings() {
     let td = tempfile::tempdir().unwrap();

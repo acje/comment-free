@@ -13,8 +13,9 @@ for automated agents.
 Default mode is read-only: it walks Rust source files under the locations
 cargo compiles as crate source — `benches/`, `crates/`, `examples/`, `src/`,
 `tests/`, and a root `build.rs` —
-and reports doc comments whose prose exceeds the configured word budget. Fenced
-code blocks are excluded from the count. Findings, run diagnostics, errors and
+and reports doc comments whose prose exceeds the configured word budget. Code is
+excluded from the count: fenced blocks, indented code blocks, inline
+code spans, and reference definitions. Findings, run diagnostics, errors and
 summaries are all emitted as JSON Lines so agents and scripts can parse them
 reliably even when a path or item label contains a tab or a newline. The one
 exception is the `--dry-run` unified diff body, which is human-facing plain

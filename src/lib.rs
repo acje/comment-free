@@ -15,7 +15,7 @@ use syn::spanned::Spanned;
 use syn::{Attribute, File, Meta, Token};
 use walkdir::WalkDir;
 /// Doctrine warning carried by the `doc_lint_header` record for every kind.
-pub const DOC_LINT_DOCTRINE_MSG: &str = "Rust docs must contain a concise summary, optionally clear code examples (fenced ``` or ~~~ blocks), and sections explaining edge cases like panics, errors, and safety. Fenced code examples are excluded from the prose word length. If applicable references to ADRs must be given.";
+pub const DOC_LINT_DOCTRINE_MSG: &str = "Rust docs must contain a concise summary, optionally clear code examples (fenced ``` or ~~~ blocks), and sections explaining edge cases like panics, errors, and safety. Code is excluded from the prose word length: fenced blocks, indented code blocks, and inline code spans. If applicable references to ADRs must be given.";
 /// Version carried by the `v` field of every `doc_lint_*` record.
 ///
 /// Consumers reject records whose `v` exceeds the version they
@@ -1578,8 +1578,13 @@ const BARE_DOC_STEMS: &[&str] = &[
 /// signal — and enforces no limit on how many a doc comment may carry.
 #[derive(Debug, Clone, Copy)]
 pub struct DocBudget {
-    /// Maximum words allowed per doc comment (prose only; fenced code,
-    /// including ` ``` ` and `~~~` blocks, is excluded from the count).
+    /// Maximum words allowed per doc comment, counting prose only.
+    ///
+    /// Code is not prose and does not count: fenced ` ``` ` and `~~~`
+    /// blocks, four-column indented code blocks, inline code spans of
+    /// any backtick run length, and reference definitions. The lint
+    /// counts against the same block and span model the rewriter uses,
+    /// so both paths agree on what is code.
     pub max_words: usize,
 }
 /// Result of counting prose words in a doc comment.
@@ -2118,6 +2123,9 @@ impl BlockScan {
             block_start: true,
         }
     }
+    const fn fence_is_open(&self) -> bool {
+        self.fence.is_open()
+    }
     fn classify(&mut self, line: &str) -> LineFrame {
         if self.fence.is_open() {
             let (next, _) = self.fence.advance(line);
@@ -2156,18 +2164,23 @@ impl BlockScan {
     }
 }
 fn prose_word_count(doc_text: &str) -> WordCount {
-    let mut fence = FenceState::Closed;
+    let lines: Vec<&str> = doc_text.split('\n').collect();
+    let mut blocks = BlockScan::new();
+    let mut span = CodeSpanState::Closed;
     let mut words = 0usize;
-    for line in doc_text.lines() {
-        let (next, delimiter) = fence.advance(line);
-        fence = next;
-        if delimiter || fence.is_open() {
-            continue;
+    for (index, line) in lines.iter().enumerate() {
+        let following = &lines[index + 1..];
+        match blocks.classify(line) {
+            LineFrame::Code | LineFrame::Definition => span = CodeSpanState::Closed,
+            LineFrame::Prose => {
+                let mut prose = String::with_capacity(line.len());
+                span = scan_code_spans(line, following, span, |outside| prose.push_str(outside));
+                words += prose.split_whitespace().count();
+            }
         }
-        words += line.split_whitespace().count();
     }
-    if fence.is_open() {
-        let recount = doc_text.lines().map(|l| l.split_whitespace().count()).sum();
+    if blocks.fence_is_open() {
+        let recount = lines.iter().map(|l| l.split_whitespace().count()).sum();
         return WordCount::FailClosed(recount);
     }
     WordCount::Balanced(words)
@@ -3716,20 +3729,36 @@ fn span_after_run(
         CodeSpanState::Closed => CodeSpanState::Closed,
     }
 }
-fn advance_span(line: &str, following: &[&str], entry: CodeSpanState) -> CodeSpanState {
+fn scan_code_spans(
+    line: &str,
+    following: &[&str],
+    entry: CodeSpanState,
+    mut outside: impl FnMut(&str),
+) -> CodeSpanState {
     let bytes = line.as_bytes();
     let mut span = entry;
     let mut i = 0;
+    let mut plain = 0;
     while i < bytes.len() {
         if bytes[i] == b'`' {
+            if !span.is_open() {
+                outside(&line[plain..i]);
+            }
             let run = backtick_run_len(bytes, i);
             span = span_after_run(span, run, &line[i + run..], following);
             i += run;
+            plain = i;
             continue;
         }
         i += 1;
     }
+    if !span.is_open() {
+        outside(&line[plain..]);
+    }
     span
+}
+fn advance_span(line: &str, following: &[&str], entry: CodeSpanState) -> CodeSpanState {
+    scan_code_spans(line, following, entry, |_| {})
 }
 fn closing_run_follows(following: &[&str], run: usize) -> bool {
     for line in following {
@@ -4886,7 +4915,53 @@ mod markdown_framing_grammar_tests {
         ));
         assert!(matches!(
             super::prose_word_count("    ```\none two"),
+            super::WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g42_inline_code_spans_are_not_prose() {
+        assert!(matches!(
+            super::prose_word_count("one `two three four` five"),
+            super::WordCount::Balanced(2)
+        ));
+        assert!(matches!(
+            super::prose_word_count("a ``b ` c`` d"),
+            super::WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g43_an_unclosed_span_leaves_its_delimiter_literal_prose() {
+        assert!(matches!(
+            super::prose_word_count("one `two three"),
             super::WordCount::Balanced(3)
+        ));
+    }
+    #[test]
+    fn g44_a_span_open_across_lines_hides_both_lines_words() {
+        assert!(matches!(
+            super::prose_word_count("one `two\nthree` four"),
+            super::WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g45_an_indented_code_block_is_not_prose() {
+        assert!(matches!(
+            super::prose_word_count("para\n\n    let x = 1;\n    let y = 2;\nafter"),
+            super::WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g46_a_reference_definition_is_link_machinery_not_prose() {
+        assert!(matches!(
+            super::prose_word_count("[label]: https://example.com/a/b\ntext"),
+            super::WordCount::Balanced(1)
+        ));
+    }
+    #[test]
+    fn g47_an_unbalanced_fence_still_recounts_every_line_as_prose() {
+        assert!(matches!(
+            super::prose_word_count("```\none `two` three"),
+            super::WordCount::FailClosed(4)
         ));
     }
 }

@@ -1720,6 +1720,31 @@ fn root_inside_crates_subtree_is_processed_directly() {
         "expected a src/lib.rs rewrite_file record when ROOT is inside crates/:\n{stdout}"
     );
 }
+#[test]
+fn ancestor_named_src_does_not_widen_the_supplied_root() {
+    let td = tempfile::tempdir().unwrap();
+    let scoped = td.path().join("src/checkout");
+    fs::create_dir_all(scoped.join("src")).expect("mkdir src/checkout/src");
+    fs::write(scoped.join("src/lib.rs"), "// removable\nfn c() {}\n").expect("write lib");
+    fs::write(scoped.join("stray.rs"), "// removable\nfn s() {}\n").expect("write stray");
+    let out = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(&scoped)
+        .output()
+        .expect("failed to spawn comment-free");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "exit {:?}", out.status.code());
+    let paths = rewritten_paths(&stdout);
+    assert!(
+        paths.iter().any(|p| p.ends_with("src/lib.rs")),
+        "expected the supplied root's own src/lib.rs:\n{stdout}"
+    );
+    assert!(
+        !paths.iter().any(|p| p.ends_with("stray.rs")),
+        "an ancestor named src must not widen traversal to the whole supplied root:\n{stdout}"
+    );
+}
 fn run_idioms(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")

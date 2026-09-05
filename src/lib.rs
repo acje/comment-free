@@ -1346,10 +1346,11 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
 const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
 fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
-    let in_scope = root
-        .components()
-        .any(|c| matches!(c.as_os_str().to_str(), Some(n) if ALLOWED_ROOT_DIRS.contains(& n)));
-    if in_scope {
+    let named_source_root = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| ALLOWED_ROOT_DIRS.contains(&n));
+    if named_source_root {
         return vec![root.to_path_buf()];
     }
     ALLOWED_ROOT_DIRS
@@ -4102,6 +4103,33 @@ mod doc_path_tests {
         assert!(!is_doc_path(Path::new("CHANGELOG.rs"), root));
         assert!(is_doc_path(Path::new("README.md"), root));
         assert!(is_doc_path(Path::new("CHANGELOG.markdown"), root));
+    }
+}
+#[cfg(test)]
+mod walk_root_tests {
+    use super::resolve_walk_roots;
+    use std::path::{Path, PathBuf};
+    #[test]
+    fn supplied_root_named_as_a_source_dir_is_walked_directly() {
+        assert_eq!(
+            resolve_walk_roots(Path::new("/comment-free-no-such-root/proj/src")),
+            vec![PathBuf::from("/comment-free-no-such-root/proj/src")]
+        );
+        assert_eq!(
+            resolve_walk_roots(Path::new("/comment-free-no-such-root/proj/crates")),
+            vec![PathBuf::from("/comment-free-no-such-root/proj/crates")]
+        );
+    }
+    #[test]
+    fn ancestor_named_as_a_source_dir_does_not_put_the_root_in_scope() {
+        assert!(
+            resolve_walk_roots(Path::new("/comment-free-no-such-root/src/checkout")).is_empty(),
+            "an ancestor named src must not make the supplied root a source root"
+        );
+        assert!(
+            resolve_walk_roots(Path::new("/comment-free-no-such-root/crates/checkout")).is_empty(),
+            "an ancestor named crates must not make the supplied root a source root"
+        );
     }
 }
 #[cfg(test)]

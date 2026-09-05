@@ -1906,6 +1906,53 @@ fn manifest_symlink_to_a_readable_file_anchors_the_supplied_subtree() {
         "a symlinked manifest must anchor the supplied subtree:\n{stdout}"
     );
 }
+#[cfg(unix)]
+#[test]
+fn an_unresolvable_allowlisted_child_is_an_error_not_a_clean_run() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path();
+    std::os::unix::fs::symlink("src", repo.join("src")).expect("self-referential src link");
+    let out = run_dry(repo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "an allowlisted child that cannot be stat-ed is undecidable, never a clean run:\n{stderr}"
+    );
+    assert!(
+        one_error(&stderr, "walk").text("path").ends_with("src"),
+        "expected a walk run_error naming the unresolvable child:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout).is_empty(),
+        "an unresolvable child must not silently vanish from the walk roots:\n{stdout}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn an_allowlisted_child_symlinked_to_a_real_directory_is_walked() {
+    let td = tempfile::tempdir().unwrap();
+    let repo = td.path();
+    let real = repo.join("realsrc/inner");
+    fs::create_dir_all(&real).expect("mkdir realsrc/inner");
+    fs::write(real.join("m.rs"), "// removable\nfn m() {}\n").expect("write fixture");
+    std::os::unix::fs::symlink("realsrc", repo.join("src")).expect("src link");
+    let out = run_dry(repo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an allowlisted child resolving to a real directory is a decided walk root:\n{stderr}"
+    );
+    assert!(
+        rewritten_paths(&stdout)
+            .iter()
+            .any(|p| p.ends_with("inner/m.rs")),
+        "a symlinked source root must still be walked:\n{stdout}"
+    );
+}
 fn run_idioms(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")

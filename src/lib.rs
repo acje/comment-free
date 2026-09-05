@@ -1404,14 +1404,40 @@ fn classify_root(root: &Path) -> Result<RootScope, WalkError> {
     }
     Ok(RootScope::ProjectRoot)
 }
+#[derive(Debug, Clone, Copy)]
+enum ChildRoot {
+    Present,
+    Absent,
+}
+fn child_source_root(child: &Path) -> Result<ChildRoot, WalkError> {
+    match std::fs::symlink_metadata(child) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ChildRoot::Absent),
+        Err(e) => Err(WalkError::at(child, &e.to_string())),
+        Ok(node) if node.is_dir() => Ok(ChildRoot::Present),
+        Ok(node) if node.is_symlink() => resolve_child_root_link(child),
+        Ok(_) => Ok(ChildRoot::Absent),
+    }
+}
+fn resolve_child_root_link(child: &Path) -> Result<ChildRoot, WalkError> {
+    match std::fs::metadata(child) {
+        Ok(target) if target.is_dir() => Ok(ChildRoot::Present),
+        Ok(_) => Ok(ChildRoot::Absent),
+        Err(e) => Err(WalkError::at(child, &e.to_string())),
+    }
+}
 fn resolve_walk_roots(root: &Path) -> Result<Vec<PathBuf>, WalkError> {
     Ok(match classify_root(root)? {
         RootScope::SourceTree => vec![root.to_path_buf()],
-        RootScope::ProjectRoot => ALLOWED_ROOT_DIRS
-            .iter()
-            .map(|d| root.join(d))
-            .filter(|p| p.is_dir())
-            .collect(),
+        RootScope::ProjectRoot => {
+            let mut bases = Vec::new();
+            for child in ALLOWED_ROOT_DIRS.iter().map(|d| root.join(d)) {
+                match child_source_root(&child)? {
+                    ChildRoot::Present => bases.push(child),
+                    ChildRoot::Absent => {}
+                }
+            }
+            bases
+        }
     })
 }
 /// Iterate every `.rs` file under `root`, yielding traversal failures
@@ -4275,6 +4301,28 @@ mod walk_root_tests {
         assert!(
             super::manifest_anchor(td.path()).is_err(),
             "a deliberate link to a missing target is not the absence of a manifest"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn an_unresolvable_allowlisted_child_is_not_a_decided_absence() {
+        let td = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("src", td.path().join("src")).unwrap();
+        let e = resolve_walk_roots(td.path())
+            .expect_err("a child that cannot be stat-ed must not be dropped as absent");
+        assert!(
+            e.path().ends_with("src"),
+            "the error must name the undecidable child, got {e:?}"
+        );
+    }
+    #[test]
+    fn an_absent_allowlisted_child_is_a_decided_absence() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir(td.path().join("src")).unwrap();
+        assert_eq!(
+            roots(td.path()),
+            vec![td.path().join("src")],
+            "an absent crates/ is a decided absence, not an error"
         );
     }
 }

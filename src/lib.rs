@@ -207,31 +207,73 @@ impl From<&CommentFreeError> for ExitCode {
     }
 }
 /// Outcome of processing one source file.
+///
+/// The diff and the on-disk write are separate variants because they
+/// are separate events: a [`RewriteMode::Write`] run never has a diff
+/// to report, and a [`RewriteMode::DryRun`] run always does.
 #[derive(Debug)]
 pub enum FileOutcome {
+    /// Write mode: the new content replaced the file on disk.
     Rewritten {
-        diff: Option<String>,
+        /// Counters for the passes applied to this file.
         counts: RewriteCounts,
     },
+    /// Dry-run mode: nothing was written; `diff` is the unified diff
+    /// the write would have produced.
+    WouldRewrite {
+        /// Unified diff between the original and the rewrite.
+        diff: String,
+        /// Counters for the passes applied to this file.
+        counts: RewriteCounts,
+    },
+    /// No bytes changed; the file was left alone in either mode.
     Unchanged {
+        /// Counters for the passes applied to this file.
         counts: RewriteCounts,
     },
-    ParseError(String),
-    IoError(String),
-    /// The destination no longer held the bytes originally read, so the
-    /// rewrite was abandoned and the file left exactly as found.
-    Conflict,
+    /// The file was not processed, and was left exactly as found.
+    Failed(FileError),
 }
+/// Why [`process_file`] could not process a file.
+///
+/// Each variant is one failure class. Callers map a variant to its
+/// [`RunErrorKind`] with [`FileError::kind`] and to its operator-facing
+/// text through [`std::fmt::Display`]; neither needs to match on the
+/// variants, which is why the enum can grow.
 #[derive(Debug, thiserror::Error)]
-enum WriteError {
-    #[error("destination changed since it was read")]
-    Conflict,
+#[non_exhaustive]
+pub enum FileError {
+    /// The file could not be parsed as Rust, so the doc-link pass could
+    /// not run. The file is untouched on disk.
+    #[error("{0}")]
+    Parse(syn::Error),
+    /// The file could not be read.
+    #[error("{0}")]
+    Read(io::Error),
+    /// The rewrite could not be written.
+    #[error("io error: {0}")]
+    Write(#[from] io::Error),
+    /// The destination is a symbolic link. Rewriting it would replace
+    /// the link rather than its target, so it is refused.
     #[error(
         "destination is a symbolic link; rewriting it would replace the link rather than its target"
     )]
     SymlinkDestination,
-    #[error("io error: {0}")]
-    Io(#[from] io::Error),
+    /// The destination no longer held the bytes originally read, so the
+    /// rewrite was abandoned and the file left exactly as found.
+    #[error("destination changed since it was read")]
+    Conflict,
+}
+impl FileError {
+    /// The `kind` field a `run_error` record carries for this failure.
+    #[must_use]
+    pub const fn kind(&self) -> RunErrorKind {
+        match self {
+            Self::Parse(_) => RunErrorKind::Parse,
+            Self::Read(_) | Self::Write(_) | Self::SymlinkDestination => RunErrorKind::Io,
+            Self::Conflict => RunErrorKind::Conflict,
+        }
+    }
 }
 struct TempFileGuard {
     path: PathBuf,
@@ -249,11 +291,11 @@ impl Drop for TempFileGuard {
         }
     }
 }
-fn write_atomically(path: &Path, expected: &str, rewritten: &str) -> Result<(), WriteError> {
+fn write_atomically(path: &Path, expected: &str, rewritten: &str) -> Result<(), FileError> {
     use std::io::Write as _;
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
-        return Err(WriteError::SymlinkDestination);
+        return Err(FileError::SymlinkDestination);
     }
     let permissions = fs::metadata(path)?.permissions();
     let (mut file, mut guard) = create_sibling_temp(path, dir)?;
@@ -263,20 +305,16 @@ fn write_atomically(path: &Path, expected: &str, rewritten: &str) -> Result<(), 
     drop(file);
     fs::set_permissions(&guard.path, permissions)?;
     if !destination_still_holds(path, expected)? {
-        return Err(WriteError::Conflict);
+        return Err(FileError::Conflict);
     }
     fs::rename(&guard.path, path)?;
     guard.disarm();
     Ok(())
 }
-const SIMULATE_WRITE_CONFLICT_ENV: &str = "COMMENT_FREE_SIMULATE_WRITE_CONFLICT";
-fn destination_still_holds(path: &Path, expected: &str) -> Result<bool, WriteError> {
-    if std::env::var_os(SIMULATE_WRITE_CONFLICT_ENV).is_some() {
-        return Ok(false);
-    }
+fn destination_still_holds(path: &Path, expected: &str) -> Result<bool, FileError> {
     Ok(fs::read_to_string(path)? == expected)
 }
-fn create_sibling_temp(path: &Path, dir: &Path) -> Result<(fs::File, TempFileGuard), WriteError> {
+fn create_sibling_temp(path: &Path, dir: &Path) -> Result<(fs::File, TempFileGuard), FileError> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let stem = path.file_name().map_or_else(
@@ -300,10 +338,10 @@ fn create_sibling_temp(path: &Path, dir: &Path) -> Result<(fs::File, TempFileGua
                 return Ok((file, guard));
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(WriteError::Io(e)),
+            Err(e) => return Err(FileError::Write(e)),
         }
     }
-    Err(WriteError::Io(io::Error::new(
+    Err(FileError::Write(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "exhausted temporary file name attempts",
     )))
@@ -562,24 +600,23 @@ pub fn lint_summary_record(files: u32, findings: u32, errors: u32) -> String {
 ///
 /// Returns:
 ///
-/// - [`FileOutcome::Rewritten`] — content changed (unified diff under
-///   [`RewriteMode::DryRun`], `None` under [`RewriteMode::Write`]).
+/// - [`FileOutcome::Rewritten`] — [`RewriteMode::Write`] replaced the
+///   file on disk.
+/// - [`FileOutcome::WouldRewrite`] — [`RewriteMode::DryRun`] produced a
+///   unified diff and wrote nothing.
 /// - [`FileOutcome::Unchanged`] — no bytes changed.
-/// - [`FileOutcome::ParseError`] — syn parse for the doc-link pass
-///   failed; file left untouched on disk.
-/// - [`FileOutcome::IoError`] — any I/O failure.
-/// - [`FileOutcome::Conflict`] — the file changed on disk between the
-///   read and the write; the destination keeps its own bytes.
+/// - [`FileOutcome::Failed`] — see [`FileError`] for the failure
+///   classes; the file is left exactly as found in every one of them.
 ///
 /// In write mode the new content lands via a sibling temporary file
 /// renamed over the destination, so the destination is never truncated
 /// in place and a partial rewrite cannot be observed. A destination
 /// that is itself a symbolic link is refused as
-/// [`FileOutcome::IoError`] rather than rewritten, because the rename
-/// would replace the link instead of its target. The temporary file is
-/// removed on every returning error path and, on a best-effort basis,
-/// while a panic unwinds; an abort or a failing removal can still leave
-/// it behind.
+/// [`FileError::SymlinkDestination`] rather than rewritten, because the
+/// rename would replace the link instead of its target. The temporary
+/// file is removed on every returning error path and, on a best-effort
+/// basis, while a panic unwinds; an abort or a failing removal can
+/// still leave it behind.
 ///
 /// Stripped: every ordinary `//` line and `/* */` block comment.
 /// Preserved: doc comments (`///`, `//!`, `/** */`, `/*! */`).
@@ -587,11 +624,11 @@ pub fn lint_summary_record(files: u32, findings: u32, errors: u32) -> String {
 pub fn process_file(path: &Path, mode: RewriteMode) -> FileOutcome {
     let original = match fs::read_to_string(path) {
         Ok(s) => s,
-        Err(e) => return FileOutcome::IoError(e.to_string()),
+        Err(e) => return FileOutcome::Failed(FileError::Read(e)),
     };
     let ast: File = match syn::parse_file(&original) {
         Ok(f) => f,
-        Err(e) => return FileOutcome::ParseError(e.to_string()),
+        Err(e) => return FileOutcome::Failed(FileError::Parse(e)),
     };
     let splices = collect_doc_splices(&ast, &original);
     let doc_links_rewritten = u32::try_from(splices.len()).unwrap_or(u32::MAX);
@@ -606,19 +643,13 @@ pub fn process_file(path: &Path, mode: RewriteMode) -> FileOutcome {
         return FileOutcome::Unchanged { counts };
     }
     match mode {
-        RewriteMode::DryRun { context } => {
-            let diff = unified_diff(path, &original, &rewritten, context);
-            FileOutcome::Rewritten {
-                diff: Some(diff),
-                counts,
-            }
-        }
+        RewriteMode::DryRun { context } => FileOutcome::WouldRewrite {
+            diff: unified_diff(path, &original, &rewritten, context),
+            counts,
+        },
         RewriteMode::Write => match write_atomically(path, &original, &rewritten) {
-            Ok(()) => FileOutcome::Rewritten { diff: None, counts },
-            Err(WriteError::Conflict) => FileOutcome::Conflict,
-            Err(e @ (WriteError::SymlinkDestination | WriteError::Io(_))) => {
-                FileOutcome::IoError(e.to_string())
-            }
+            Ok(()) => FileOutcome::Rewritten { counts },
+            Err(e) => FileOutcome::Failed(e),
         },
     }
 }
@@ -1635,7 +1666,8 @@ fn impl_item_label_and_attrs(item: &syn::ImplItem) -> Option<(String, &[Attribut
 #[cfg(test)]
 mod atomic_write_tests {
     use super::{
-        FileOutcome, RewriteMode, WriteError, create_sibling_temp, process_file, write_atomically,
+        FileError, FileOutcome, RewriteMode, RunErrorKind, create_sibling_temp, process_file,
+        write_atomically,
     };
     use std::fs;
     const fn write_opts() -> RewriteMode {
@@ -1650,12 +1682,48 @@ mod atomic_write_tests {
         names
     }
     #[test]
+    fn every_file_error_class_maps_to_its_run_error_kind() {
+        let io = || std::io::Error::other("boom");
+        let parse = syn::parse_file("fn f( {").unwrap_err();
+        assert_eq!(FileError::Parse(parse).kind(), RunErrorKind::Parse);
+        assert_eq!(FileError::Read(io()).kind(), RunErrorKind::Io);
+        assert_eq!(FileError::Write(io()).kind(), RunErrorKind::Io);
+        assert_eq!(FileError::SymlinkDestination.kind(), RunErrorKind::Io);
+        assert_eq!(FileError::Conflict.kind(), RunErrorKind::Conflict);
+    }
+    #[test]
+    fn an_unreadable_file_is_a_read_failure_not_a_parse_failure() {
+        let td = tempfile::tempdir().unwrap();
+        let missing = td.path().join("nope.rs");
+        match process_file(&missing, write_opts()) {
+            FileOutcome::Failed(e @ FileError::Read(_)) => {
+                assert_eq!(e.kind(), RunErrorKind::Io);
+            }
+            other => panic!("expected Failed(Read), got {other:?}"),
+        }
+    }
+    #[test]
+    fn a_conflict_reports_itself_as_a_conflict_run_error() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        fs::write(&path, "concurrent editor won\n").unwrap();
+        let err = write_atomically(&path, "bytes we read earlier\n", "our rewrite\n").unwrap_err();
+        assert_eq!(err.kind(), RunErrorKind::Conflict);
+        assert_eq!(err.to_string(), "destination changed since it was read");
+        let record = super::run_error_record(err.kind(), &path, &err.to_string());
+        assert!(record.contains("\"kind\":\"conflict\""), "{record}");
+        assert!(
+            record.contains("\"message\":\"destination changed since it was read\""),
+            "{record}"
+        );
+    }
+    #[test]
     fn destination_changed_since_read_is_a_conflict_and_leaves_bytes_untouched() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("a.rs");
         fs::write(&path, "concurrent editor won\n").unwrap();
         let err = write_atomically(&path, "bytes we read earlier\n", "our rewrite\n").unwrap_err();
-        assert!(matches!(err, WriteError::Conflict), "got {err:?}");
+        assert!(matches!(err, FileError::Conflict), "got {err:?}");
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "concurrent editor won\n"
@@ -1669,7 +1737,7 @@ mod atomic_write_tests {
         fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
         assert!(matches!(
             write_atomically(&path, "stale bytes\n", "never lands\n"),
-            Err(WriteError::Conflict)
+            Err(FileError::Conflict)
         ));
         match process_file(&path, write_opts()) {
             FileOutcome::Rewritten { .. } => {}
@@ -1714,8 +1782,11 @@ mod atomic_write_tests {
         fs::write(&target, "// drop me\nfn f() {}\n").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
         match process_file(&link, write_opts()) {
-            FileOutcome::IoError(msg) => assert!(msg.contains("symbolic link"), "got {msg}"),
-            other => panic!("expected IoError, got {other:?}"),
+            FileOutcome::Failed(e @ FileError::SymlinkDestination) => {
+                assert_eq!(e.kind(), RunErrorKind::Io);
+                assert!(e.to_string().contains("symbolic link"), "got {e}");
+            }
+            other => panic!("expected Failed(SymlinkDestination), got {other:?}"),
         }
         assert_eq!(
             fs::read_to_string(&target).unwrap(),
@@ -1752,7 +1823,7 @@ mod atomic_write_tests {
         let path = td.path().join("a.rs");
         fs::create_dir(&path).unwrap();
         let err = write_atomically(&path, "bytes we read earlier\n", "our rewrite\n").unwrap_err();
-        assert!(matches!(err, WriteError::Io(_)), "got {err:?}");
+        assert!(matches!(err, FileError::Write(_)), "got {err:?}");
         assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
     }
 }
@@ -1789,11 +1860,17 @@ mod process_file_tests {
         let path = td.path().join("a.rs");
         fs::write(&path, "// SAFETY: pointer is valid\nfn f() {}\n").unwrap();
         match process_file(&path, opts()) {
-            FileOutcome::Rewritten { counts, .. } => {
+            FileOutcome::WouldRewrite { diff, counts } => {
                 assert_eq!(counts.comments_removed, 1);
+                assert!(!diff.is_empty(), "dry run must carry a diff");
             }
-            other => panic!("expected Rewritten for SAFETY-only file, got {other:?}"),
+            other => panic!("expected WouldRewrite for SAFETY-only file, got {other:?}"),
         }
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "// SAFETY: pointer is valid\nfn f() {}\n",
+            "dry run must not touch the file"
+        );
     }
     #[test]
     fn strip_line_comments_drops_ordinary_line_comments() {

@@ -750,38 +750,37 @@ fn strip_with_parse_error_exits_five() {
     );
 }
 #[test]
-fn strip_with_a_write_conflict_exits_five_and_leaves_the_file_untouched() {
+fn strip_reporting_a_typed_failure_exits_five_and_leaves_the_file_untouched() {
     let td = tempfile::tempdir().unwrap();
-    write(td.path(), "a.rs", "// drop me\nfn f() {}\n");
-    let out = Command::new(bin())
-        .arg("--rewrite")
-        .arg(td.path())
-        .env("COMMENT_FREE_SIMULATE_WRITE_CONFLICT", "1")
-        .output()
-        .expect("failed to spawn comment-free");
+    write(td.path(), "broken.rs", "// drop me\nfn f( {\n");
+    let out = run(td.path());
     let stderr = String::from_utf8_lossy(&out.stderr);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(
         out.status.code(),
         Some(5),
-        "a write conflict must exit 5:\nstdout: {stdout}\nstderr: {stderr}"
+        "a typed per-file failure must exit 5:\nstdout: {stdout}\nstderr: {stderr}"
     );
-    let conflict = one_error(&stderr, "conflict");
+    let failure = one_error(&stderr, "parse");
     assert!(
-        conflict.text("path").ends_with("a.rs"),
-        "conflict run_error must name the abandoned file:\n{stderr}"
+        failure.text("path").ends_with("broken.rs"),
+        "the run_error must name the file it declined:\n{stderr}"
+    );
+    assert!(
+        !failure.text("message").is_empty(),
+        "the run_error must carry the failure's own text:\n{stderr}"
     );
     assert_eq!(
-        conflict.text("message"),
-        "destination changed since it was read"
+        read(td.path(), "broken.rs"),
+        "// drop me\nfn f( {\n",
+        "a declined file must keep its own bytes"
     );
-    assert_eq!(read(td.path(), "a.rs"), "// drop me\nfn f() {}\n");
     let mut residue: Vec<String> = fs::read_dir(td.path().join("src"))
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     residue.sort();
-    assert_eq!(residue, vec!["a.rs".to_string()]);
+    assert_eq!(residue, vec!["broken.rs".to_string()]);
 }
 fn run_lint(root: &Path) -> std::process::Output {
     Command::new(bin())

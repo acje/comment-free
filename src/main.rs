@@ -272,36 +272,24 @@ fn run_strip(opts: &Options) -> u32 {
             }
         };
         match process_file(&path, mode) {
-            FileOutcome::Rewritten { diff, counts } => {
+            FileOutcome::Rewritten { counts } => {
                 rewritten += 1;
                 counts_total += counts;
                 println!("{}", rewrite_file_record(mode, &path));
-                if let Some(d) = diff {
-                    print!("{d}");
-                }
+            }
+            FileOutcome::WouldRewrite { diff, counts } => {
+                rewritten += 1;
+                counts_total += counts;
+                println!("{}", rewrite_file_record(mode, &path));
+                print!("{diff}");
             }
             FileOutcome::Unchanged { counts } => {
                 unchanged += 1;
                 counts_total += counts;
             }
-            FileOutcome::ParseError(msg) => {
+            FileOutcome::Failed(e) => {
                 errors += 1;
-                eprintln!("{}", run_error_record(RunErrorKind::Parse, &path, &msg));
-            }
-            FileOutcome::IoError(msg) => {
-                errors += 1;
-                eprintln!("{}", run_error_record(RunErrorKind::Io, &path, &msg));
-            }
-            FileOutcome::Conflict => {
-                errors += 1;
-                eprintln!(
-                    "{}",
-                    run_error_record(
-                        RunErrorKind::Conflict,
-                        &path,
-                        "destination changed since it was read"
-                    )
-                );
+                eprintln!("{}", run_error_record(e.kind(), &path, &e.to_string()));
             }
         }
     }

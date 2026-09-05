@@ -3,6 +3,7 @@
 #![warn(clippy::missing_const_for_fn)]
 use ra_ap_rustc_lexer::{FrontmatterAllowed, TokenKind, tokenize};
 use similar::{ChangeTag, TextDiff};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -1821,24 +1822,130 @@ fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &
         }
     }
 }
+const fn leading_columns(line: &str) -> (usize, usize) {
+    let bytes = line.as_bytes();
+    let mut col = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' => col += 1,
+            b'\t' => col = (col / 4 + 1) * 4,
+            _ => return (col, i),
+        }
+        i += 1;
+    }
+    (col, i)
+}
+fn fence_delimiter_run(line: &str) -> Option<(u8, usize, &str)> {
+    let (col, offset) = leading_columns(line);
+    if col > 3 {
+        return None;
+    }
+    let rest = &line[offset..];
+    let marker = *rest.as_bytes().first()?;
+    if marker != b'`' && marker != b'~' {
+        return None;
+    }
+    let run = rest.bytes().take_while(|b| *b == marker).count();
+    if run < 3 {
+        return None;
+    }
+    Some((marker, run, &rest[run..]))
+}
 fn opens_or_closes_fence(line: &str) -> bool {
-    let stripped = line.trim_start();
-    stripped.starts_with("```") || stripped.starts_with("~~~")
+    fence_delimiter_run(line).is_some()
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FenceState {
+    Closed,
+    Open { marker: u8, run: usize },
+}
+impl FenceState {
+    fn advance(self, line: &str) -> (Self, bool) {
+        match (self, fence_delimiter_run(line)) {
+            (Self::Closed, Some((marker, run, info))) if marker == b'~' || !info.contains('`') => {
+                (Self::Open { marker, run }, true)
+            }
+            (Self::Open { marker, run }, Some((found, found_run, tail)))
+                if found == marker && found_run >= run && tail.trim().is_empty() =>
+            {
+                (Self::Closed, true)
+            }
+            (state, _) => (state, false),
+        }
+    }
+    const fn is_open(self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineFrame {
+    Code,
+    Definition,
+    Prose,
+}
+struct BlockScan {
+    fence: FenceState,
+    indented_code: bool,
+    block_start: bool,
+}
+impl BlockScan {
+    const fn new() -> Self {
+        Self {
+            fence: FenceState::Closed,
+            indented_code: false,
+            block_start: true,
+        }
+    }
+    fn classify(&mut self, line: &str) -> LineFrame {
+        if self.fence.is_open() {
+            let (next, _) = self.fence.advance(line);
+            self.fence = next;
+            self.block_start = !next.is_open();
+            return LineFrame::Code;
+        }
+        let blank = line.trim().is_empty();
+        let (col, _) = leading_columns(line);
+        if self.indented_code {
+            if blank || col >= 4 {
+                return LineFrame::Code;
+            }
+            self.indented_code = false;
+            self.block_start = true;
+        }
+        if blank {
+            self.block_start = true;
+            return LineFrame::Prose;
+        }
+        let (next, delimiter) = self.fence.advance(line);
+        if delimiter {
+            self.fence = next;
+            self.block_start = false;
+            return LineFrame::Code;
+        }
+        if self.block_start && col >= 4 {
+            self.indented_code = true;
+            return LineFrame::Code;
+        }
+        if self.block_start && is_reference_definition(line) {
+            return LineFrame::Definition;
+        }
+        self.block_start = false;
+        LineFrame::Prose
+    }
 }
 fn prose_word_count(doc_text: &str) -> WordCount {
-    let mut in_fence = false;
+    let mut fence = FenceState::Closed;
     let mut words = 0usize;
     for line in doc_text.lines() {
-        if opens_or_closes_fence(line) {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
+        let (next, delimiter) = fence.advance(line);
+        fence = next;
+        if delimiter || fence.is_open() {
             continue;
         }
         words += line.split_whitespace().count();
     }
-    if in_fence {
+    if fence.is_open() {
         let recount = doc_text.lines().map(|l| l.split_whitespace().count()).sum();
         return WordCount::FailClosed(recount);
     }
@@ -2833,10 +2940,17 @@ mod doc_lint_tests {
 /// Rewrite mechanically-safe Rust item links in `doc_text`.
 ///
 /// Operates on the prose of a single doc-comment block (concatenated
-/// payloads of one item, joined by `\n`). Maintains fenced-code state
-/// across lines (` ``` ` and `~~~`); transforms inside a fence are
-/// suppressed, as are byte ranges covered by inline code spans
-/// (single-backtick pairs).
+/// payloads of one item, joined by `\n`). Block structure is resolved
+/// before inline structure, as `CommonMark` requires:
+///
+/// ```text
+/// - fenced code: 0-3 columns of indent, closed only by the same marker
+///   with a run at least as long as the opener
+/// - indented code: 4+ columns at a block start, tab counting to column 4
+/// - reference definitions: recognised only at a block start
+/// - inline code spans: tracked only within the remaining prose lines; a
+///   run with no matching closing run inside its block is literal text
+/// ```
 ///
 /// Rules applied only when the label is a conservative Rust item
 /// token:
@@ -2850,10 +2964,12 @@ mod doc_lint_tests {
 /// Skipped (left verbatim):
 ///
 /// ```text
-/// - lines inside fenced code blocks
-/// - spans inside inline code (`code`)
+/// - lines inside fenced code blocks and indented code blocks
+/// - spans inside inline code, for any backtick run length
 /// - URL targets (contain ://, or start with /, #, mailto:)
 /// - reference definitions ([label]: <url>) and reference links ([label][ref])
+/// - shortcut references whose label is defined anywhere in the block
+/// - labels opened by an escaped bracket (\[label])
 /// - targets with generics, disambiguators, or fragments (< > @ # ( ) ! ?)
 /// - labels already wrapped in backticks (idempotent)
 /// - prose labels — anything not matching is_codeish_path
@@ -2861,70 +2977,210 @@ mod doc_lint_tests {
 /// ```
 #[must_use]
 pub fn rewrite_rustdoc_link_idioms(doc_text: &str) -> String {
+    let labels = ReferenceLabels::index(doc_text);
+    let lines: Vec<&str> = doc_text.split('\n').collect();
     let mut out = String::with_capacity(doc_text.len());
-    let mut in_fence = false;
-    let mut first = true;
-    for line in doc_text.split('\n') {
-        if !first {
+    let mut blocks = BlockScan::new();
+    let mut span = CodeSpanState::Closed;
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
             out.push('\n');
         }
-        first = false;
-        let stripped = line.trim_start();
-        if stripped.starts_with("```") || stripped.starts_with("~~~") {
-            in_fence = !in_fence;
-            out.push_str(line);
-            continue;
+        let following = &lines[index + 1..];
+        match blocks.classify(line) {
+            LineFrame::Code | LineFrame::Definition => {
+                span = CodeSpanState::Closed;
+                out.push_str(line);
+            }
+            LineFrame::Prose => {
+                span = rewrite_line_links(line, following, &labels, span, &mut out);
+            }
         }
-        if in_fence {
-            out.push_str(line);
-            continue;
-        }
-        if is_reference_definition(line) {
-            out.push_str(line);
-            continue;
-        }
-        rewrite_line_links(line, &mut out);
     }
     out
 }
-fn is_reference_definition(line: &str) -> bool {
+struct ReferenceLabels(BTreeSet<String>);
+impl ReferenceLabels {
+    fn index(doc_text: &str) -> Self {
+        let lines: Vec<&str> = doc_text.split('\n').collect();
+        let mut labels = BTreeSet::new();
+        let mut blocks = BlockScan::new();
+        let mut span = CodeSpanState::Closed;
+        for (index, line) in lines.iter().enumerate() {
+            let following = &lines[index + 1..];
+            match blocks.classify(line) {
+                LineFrame::Code => span = CodeSpanState::Closed,
+                LineFrame::Prose => span = advance_span(line, following, span),
+                LineFrame::Definition => {
+                    span = CodeSpanState::Closed;
+                    if let Some(label) = reference_definition_label(line) {
+                        let normalised = normalise_link_label(label);
+                        if !normalised.is_empty() {
+                            labels.insert(normalised);
+                        }
+                    }
+                }
+            }
+        }
+        Self(labels)
+    }
+    fn defines(&self, label_src: &str) -> bool {
+        self.0.contains(&normalise_link_label(label_src))
+    }
+}
+fn normalise_link_label(label_src: &str) -> String {
+    let mut normalised = String::with_capacity(label_src.len());
+    let mut gap = false;
+    for ch in label_src.trim().chars() {
+        if ch.is_whitespace() {
+            gap = true;
+            continue;
+        }
+        if gap && !normalised.is_empty() {
+            normalised.push(' ');
+        }
+        gap = false;
+        normalised.extend(ch.to_lowercase());
+    }
+    normalised
+}
+fn reference_definition_label(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    let Some(rest) = trimmed.strip_prefix('[') else {
-        return false;
-    };
-    let Some(close) = rest.find(']') else {
-        return false;
-    };
-    rest[close + 1..].starts_with(':')
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    let close = find_matching_bracket(trimmed, 0)?;
+    if !trimmed[close + 1..].starts_with(':') {
+        return None;
+    }
+    Some(&trimmed[1..close])
 }
-fn char_len_at(line: &str, start: usize) -> usize {
-    line[start..].chars().next().map_or(1, char::len_utf8)
+fn is_reference_definition(line: &str) -> bool {
+    reference_definition_label(line).is_some()
 }
-fn rewrite_line_links(line: &str, out: &mut String) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodeSpanState {
+    Closed,
+    Open { run: usize },
+}
+impl CodeSpanState {
+    const fn is_open(self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+}
+fn span_after_run(
+    span: CodeSpanState,
+    run: usize,
+    rest: &str,
+    following: &[&str],
+) -> CodeSpanState {
+    match span {
+        CodeSpanState::Open { run: open } if open == run => CodeSpanState::Closed,
+        open @ CodeSpanState::Open { .. } => open,
+        CodeSpanState::Closed
+            if line_has_backtick_run(rest, run) || closing_run_follows(following, run) =>
+        {
+            CodeSpanState::Open { run }
+        }
+        CodeSpanState::Closed => CodeSpanState::Closed,
+    }
+}
+fn advance_span(line: &str, following: &[&str], entry: CodeSpanState) -> CodeSpanState {
     let bytes = line.as_bytes();
-    let mut in_code_span = false;
+    let mut span = entry;
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'`' {
-            in_code_span = !in_code_span;
-            out.push('`');
-            i += 1;
+            let run = backtick_run_len(bytes, i);
+            span = span_after_run(span, run, &line[i + run..], following);
+            i += run;
             continue;
         }
-        if in_code_span || bytes[i] != b'[' {
+        i += 1;
+    }
+    span
+}
+fn closing_run_follows(following: &[&str], run: usize) -> bool {
+    for line in following {
+        if line.trim().is_empty() || FenceState::Closed.advance(line).1 {
+            return false;
+        }
+        if line_has_backtick_run(line, run) {
+            return true;
+        }
+    }
+    false
+}
+const fn line_has_backtick_run(line: &str, run: usize) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let found = backtick_run_len(bytes, i);
+            if found == run {
+                return true;
+            }
+            i += found;
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+const fn backtick_run_len(bytes: &[u8], start: usize) -> usize {
+    let mut end = start;
+    while end < bytes.len() && bytes[end] == b'`' {
+        end += 1;
+    }
+    end - start
+}
+fn rewrite_line_links(
+    line: &str,
+    following: &[&str],
+    labels: &ReferenceLabels,
+    entry: CodeSpanState,
+    out: &mut String,
+) -> CodeSpanState {
+    let bytes = line.as_bytes();
+    let mut span = entry;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let run = backtick_run_len(bytes, i);
+            span = span_after_run(span, run, &line[i + run..], following);
+            out.push_str(&line[i..i + run]);
+            i += run;
+            continue;
+        }
+        if !span.is_open() && bytes[i] == b'\\' {
+            let escaped = escape_pair_len(line, i);
+            out.push_str(&line[i..i + escaped]);
+            i += escaped;
+            continue;
+        }
+        if span.is_open() || bytes[i] != b'[' {
             let step = char_len_at(line, i);
             out.push_str(&line[i..i + step]);
             i += step;
             continue;
         }
         if let Some((shape, consumed)) = parse_link_at(line, i) {
-            emit_link(out, &shape);
+            emit_link(out, &shape, labels);
             i += consumed;
         } else {
             out.push('[');
             i += 1;
         }
     }
+    span
+}
+fn escape_pair_len(line: &str, start: usize) -> usize {
+    let mut chars = line[start..].chars();
+    let backslash = chars.next().map_or(0, char::len_utf8);
+    backslash + chars.next().map_or(0, char::len_utf8)
+}
+fn char_len_at(line: &str, start: usize) -> usize {
+    line[start..].chars().next().map_or(1, char::len_utf8)
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LinkShape {
@@ -2994,7 +3250,7 @@ const fn find_matching_paren(line: &str, open: usize) -> Option<usize> {
     }
     None
 }
-fn emit_link(out: &mut String, shape: &LinkShape) {
+fn emit_link(out: &mut String, shape: &LinkShape, labels: &ReferenceLabels) {
     match shape {
         LinkShape::Reference { raw } => {
             out.push_str(raw);
@@ -3003,7 +3259,7 @@ fn emit_link(out: &mut String, shape: &LinkShape) {
             label_src,
             target_src,
         } => emit_inline_link(out, label_src, target_src),
-        LinkShape::Shortcut { label_src } => emit_shortcut_link(out, label_src),
+        LinkShape::Shortcut { label_src } => emit_shortcut_link(out, label_src, labels),
     }
 }
 fn emit_inline_link(out: &mut String, label_src: &str, target_src: &str) {
@@ -3022,8 +3278,11 @@ fn emit_inline_link(out: &mut String, label_src: &str, target_src: &str) {
     }
     write_inline(out, label_src, target_src);
 }
-fn emit_shortcut_link(out: &mut String, label_src: &str) {
-    if is_codeish_path(label_src) && !label_src_has_backticks(label_src) {
+fn emit_shortcut_link(out: &mut String, label_src: &str, labels: &ReferenceLabels) {
+    if is_codeish_path(label_src)
+        && !label_src_has_backticks(label_src)
+        && !labels.defines(label_src)
+    {
         write_shortcut_ticked(out, label_src);
     } else {
         out.push('[');
@@ -3475,5 +3734,232 @@ mod record_tests {
     fn both_record_versions_are_two() {
         assert_eq!(DOC_LINT_RECORD_VERSION, 2);
         assert_eq!(REWRITE_RECORD_VERSION, 2);
+    }
+}
+#[cfg(test)]
+mod markdown_framing_grammar_tests {
+    use super::rewrite_rustdoc_link_idioms as rw;
+    fn unchanged(input: &str) {
+        assert_eq!(rw(input), input, "expected byte-identical for {input:?}");
+    }
+    #[test]
+    fn g01_shortcut_with_later_definition_is_preserved() {
+        unchanged("see [Type] here\n\n[Type]: https://example.com/t");
+    }
+    #[test]
+    fn g02_shortcut_without_definition_is_still_ticked() {
+        assert_eq!(
+            rw("see [Type] here\n\n[Other]: https://example.com/o"),
+            "see [`Type`] here\n\n[Other]: https://example.com/o"
+        );
+    }
+    #[test]
+    fn g03_definition_before_reference_is_preserved() {
+        unchanged("[Type]: https://example.com/t\n\nsee [Type] here");
+    }
+    #[test]
+    fn g04_label_match_is_case_and_whitespace_normalised() {
+        unchanged("see [type] here\n\n[Type]: https://example.com/t");
+        unchanged("see [Foo   Bar] here\n\n[foo bar]: https://example.com/f");
+    }
+    #[test]
+    fn g05_collapsed_reference_is_preserved() {
+        unchanged("see [Type][] here\n\n[Type]: https://example.com/t");
+    }
+    #[test]
+    fn g06_full_reference_is_preserved() {
+        unchanged("see [Type][ref] here\n\n[ref]: https://example.com/t");
+    }
+    #[test]
+    fn g07_inline_link_still_collapses_even_with_a_definition_present() {
+        assert_eq!(
+            rw("see [Type](Type) here\n\n[Type]: https://example.com/t"),
+            "see [`Type`] here\n\n[Type]: https://example.com/t"
+        );
+    }
+    #[test]
+    fn g08_definition_indented_up_to_three_spaces_is_indexed() {
+        unchanged("see [Type] here\n\n   [Type]: https://example.com/t");
+    }
+    #[test]
+    fn g10_definition_with_title_on_same_or_next_line_is_indexed() {
+        unchanged("see [Type] here\n\n[Type]: https://example.com/t \"A title\"");
+        unchanged("see [Type] here\n\n[Type]: https://example.com/t\n   \"A title\"");
+    }
+    #[test]
+    fn g11_label_spanning_a_line_break_is_never_rewritten() {
+        unchanged("see [Type\nName] here");
+    }
+    #[test]
+    fn g12_escaped_open_bracket_is_not_a_link() {
+        unchanged("literal \\[Type] stays");
+        unchanged("literal \\[Type\\] stays");
+    }
+    #[test]
+    fn g13_single_backtick_span_is_preserved() {
+        unchanged("use `[Type]` verbatim");
+    }
+    #[test]
+    fn g14_two_backtick_span_is_preserved() {
+        unchanged("use ``[Type]`` verbatim");
+    }
+    #[test]
+    fn g15_three_backtick_inline_span_is_preserved() {
+        unchanged("use ```[Type]``` verbatim");
+    }
+    #[test]
+    fn g16_opening_run_longer_than_closing_run_is_literal_and_rewrites() {
+        assert_eq!(rw("use ```[Type]` verbatim"), "use ```[`Type`]` verbatim");
+    }
+    #[test]
+    fn g17_closing_run_longer_than_opening_run_is_literal_and_rewrites() {
+        assert_eq!(rw("use `[Type]``` verbatim"), "use `[`Type`]``` verbatim");
+    }
+    #[test]
+    fn g18_backticks_inside_a_fenced_block_are_inert() {
+        unchanged("before\n```\n``[Type]``\n```\nafter [Other][r]\n\n[r]: https://e.com/r");
+    }
+    #[test]
+    fn g19_unmatched_run_does_not_panic_and_still_rewrites() {
+        assert_eq!(rw("dangling `` [Type] tail"), "dangling `` [`Type`] tail");
+        assert_eq!(rw("dangling ` [Type] tail"), "dangling ` [`Type`] tail");
+    }
+    #[test]
+    fn g20_multi_line_code_span_is_preserved() {
+        unchanged("open ``spanning\n[Type] still code`` closed");
+    }
+    #[test]
+    fn g21_stray_backtick_does_not_disable_the_next_line() {
+        assert_eq!(
+            rw("stray ` tail\nthe [Type] applies"),
+            "stray ` tail\nthe [`Type`] applies"
+        );
+    }
+    #[test]
+    fn g22_definition_inside_a_fenced_block_does_not_shield_a_shortcut() {
+        assert_eq!(
+            rw("see [Type] here\n```\n[Type]: https://example.com/t\n```\ndone"),
+            "see [`Type`] here\n```\n[Type]: https://example.com/t\n```\ndone"
+        );
+    }
+    #[test]
+    fn g09_definition_indented_four_spaces_is_indented_code_not_a_definition() {
+        assert_eq!(
+            rw("see [Type] here\n\n    [Type]: https://example.com/t"),
+            "see [`Type`] here\n\n    [Type]: https://example.com/t"
+        );
+    }
+    #[test]
+    fn g23_inline_span_opening_with_three_ticks_is_not_a_fence() {
+        assert_eq!(
+            rw("```[Type]``` tail\n[Other] applies"),
+            "```[Type]``` tail\n[`Other`] applies"
+        );
+    }
+    #[test]
+    fn g24_three_tick_line_does_not_close_a_four_tick_fence() {
+        assert_eq!(
+            rw("````\n```\n[Type]\n````\nafter [Other]"),
+            "````\n```\n[Type]\n````\nafter [`Other`]"
+        );
+    }
+    #[test]
+    fn g25_open_code_span_survives_a_definition_looking_line() {
+        unchanged("``open\n[Type]: /type\n[Other]\nclose``");
+    }
+    #[test]
+    fn g26_tab_indented_definition_is_indented_code_not_a_definition() {
+        assert_eq!(
+            rw("see [Type] here\n\n\t[Type]: https://example.com/t"),
+            "see [`Type`] here\n\n\t[Type]: https://example.com/t"
+        );
+    }
+    #[test]
+    fn g27_fence_opener_indented_four_spaces_is_not_a_fence() {
+        assert_eq!(rw("    ```\n[Type] here"), "    ```\n[`Type`] here");
+    }
+    #[test]
+    fn g28_backtick_line_does_not_close_a_tilde_fence() {
+        assert_eq!(
+            rw("~~~\n[Type]\n```\n[Other]\n~~~\ndone [Third]"),
+            "~~~\n[Type]\n```\n[Other]\n~~~\ndone [`Third`]"
+        );
+    }
+    #[test]
+    fn g29_shorter_closer_does_not_close_and_fence_runs_to_end() {
+        unchanged("````\n[Type]\n```\n[Other]");
+    }
+    #[test]
+    fn g40_invalid_backtick_opener_does_not_interrupt_a_code_span() {
+        unchanged("``open [Type]\n```foo`bar\nclose``");
+    }
+    #[test]
+    fn g41_valid_backtick_opener_with_info_interrupts_a_code_span() {
+        assert_eq!(
+            rw("``open [Type]\n```foo\nclose``"),
+            "``open [`Type`]\n```foo\nclose``"
+        );
+    }
+    #[test]
+    fn g30_definition_cannot_interrupt_a_paragraph() {
+        assert_eq!(
+            rw("text paragraph\n[Type]: https://example.com/t\n\nsee [Type] here"),
+            "text paragraph\n[`Type`]: https://example.com/t\n\nsee [`Type`] here"
+        );
+    }
+    #[test]
+    fn g31_blank_line_terminates_an_open_code_span() {
+        assert_eq!(
+            rw("open ``run\n\n[Type] applies\nclose``"),
+            "open ``run\n\n[`Type`] applies\nclose``"
+        );
+    }
+    #[test]
+    fn g32_span_closing_mid_line_leaves_the_tail_rewritable() {
+        assert_eq!(
+            rw("``open close`` and [Type]"),
+            "``open close`` and [`Type`]"
+        );
+    }
+    #[test]
+    fn g33_fence_closer_with_trailing_text_does_not_close() {
+        unchanged("```\n[Type]\n``` tail\n[Other]");
+    }
+    #[test]
+    fn g35_indented_code_block_at_block_start_is_preserved() {
+        unchanged("para\n\n    [Type]\n\nnope");
+    }
+    #[test]
+    fn g37_a_fence_interrupts_an_open_code_span() {
+        unchanged("``open\n```\nclose``\nafter [Type]");
+    }
+    #[test]
+    fn g39_a_span_cannot_close_past_a_fence_so_its_delimiter_is_literal() {
+        assert_eq!(
+            rw("``open\ntext [Type] here\n```\nclose``"),
+            "``open\ntext [`Type`] here\n```\nclose``"
+        );
+    }
+    #[test]
+    fn g38_rewriting_resumes_after_a_fence_that_interrupted_a_span() {
+        assert_eq!(
+            rw("``open\n```\ncode\n```\nafter [Type]"),
+            "``open\n```\ncode\n```\nafter [`Type`]"
+        );
+    }
+    #[test]
+    fn g36_four_space_indent_interrupting_a_paragraph_is_prose() {
+        assert_eq!(rw("para\n    [Type]"), "para\n    [`Type`]");
+    }
+    #[test]
+    fn g34_lint_path_fence_tracking_matches_the_rewriter() {
+        assert!(matches!(
+            super::prose_word_count("````\n```\none two\n````\nthree"),
+            super::WordCount::Balanced(1)
+        ));
+        assert!(matches!(
+            super::prose_word_count("    ```\none two"),
+            super::WordCount::Balanced(3)
+        ));
     }
 }

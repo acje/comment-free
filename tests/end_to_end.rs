@@ -2998,3 +2998,117 @@ fn parser_rejects_a_diagnostic_record_version_it_does_not_understand() {
     let line = "{\"record\":\"lint_summary\",\"v\":99,\"files\":1,\"findings\":0,\"errors\":0}";
     assert_eq!(parse_record(line), Err(RecordError::VersionTooNew(99)));
 }
+#[test]
+fn idioms_flag_preserves_a_shortcut_reference_with_a_definition() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// see [Type] here\n\
+                    ///\n\
+                    /// [Type]: https://example.com/t\n\
+                    pub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    let out = run_idioms(td.path());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        original,
+        "shortcut reference bound to a definition must be byte-identical"
+    );
+}
+#[test]
+fn idioms_flag_still_ticks_a_shortcut_with_no_definition() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// see [Type] here\n\
+                    ///\n\
+                    /// [Other]: https://example.com/o\n\
+                    pub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    run_idioms(td.path());
+    let out = read(td.path(), "a.rs");
+    assert!(
+        out.contains("[`Type`]"),
+        "an unbound shortcut must still be ticked, got:\n{out}"
+    );
+}
+#[test]
+fn idioms_flag_matches_definition_labels_case_insensitively() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// see [type] here\n\
+                    ///\n\
+                    /// [Type]: https://example.com/t\n\
+                    pub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    run_idioms(td.path());
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        original,
+        "CommonMark label normalisation must match [type] to [Type]:"
+    );
+}
+#[test]
+fn idioms_flag_preserves_multi_backtick_code_spans() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// two ``[Type]`` and three ```[Type]``` spans\npub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    run_idioms(td.path());
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        original,
+        "multi-backtick code spans must be byte-identical"
+    );
+}
+#[test]
+fn idioms_flag_treats_an_unmatched_backtick_run_as_literal() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// dangling `` [Type] tail\npub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    let out = run_idioms(td.path());
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "unmatched delimiter must not crash the run"
+    );
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        "/// dangling `` [`Type`] tail\npub struct Type;\n",
+        "rustdoc 1.98 treats an unmatched run as literal, so the link is eligible"
+    );
+}
+#[test]
+fn idioms_flag_preserves_a_four_backtick_fence_containing_a_three_backtick_line() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// ````\n/// ```\n/// [Type]\n/// ````\n/// after [Type]\npub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    let out = run_idioms(td.path());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        "/// ````\n/// ```\n/// [Type]\n/// ````\n/// after [`Type`]\npub struct Type;\n",
+        "a shorter run must not close a longer fence"
+    );
+}
+#[test]
+fn idioms_flag_preserves_a_code_span_spanning_a_definition_looking_line() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// ``open\n/// [Type]: /type\n/// [Type]\n/// close``\npub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    let out = run_idioms(td.path());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        original,
+        "a definition-looking line must not reset an open code span"
+    );
+}
+#[test]
+fn idioms_flag_rewrites_a_shortcut_whose_definition_is_indented_code() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "/// see [Type] here\n///\n///     [Type]: /type\npub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    let out = run_idioms(td.path());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        "/// see [`Type`] here\n///\n///     [Type]: /type\npub struct Type;\n",
+        "four-space indentation is indented code, not a reference definition"
+    );
+}

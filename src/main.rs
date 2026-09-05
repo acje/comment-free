@@ -146,13 +146,6 @@ fn report_argv_rejection(rejection: &ArgvRejection) -> ExitCode {
     }
 }
 
-/// What the parsed argv asked the tool to do.
-///
-/// `Options` is the argv surface clap needs: a flat bag of flags whose
-/// legal combinations are enforced by `requires` attributes at parse
-/// time. Every path past [`Options::into_command`] takes this instead,
-/// so no later code can pair a diff width with a lint run or a word
-/// budget with a rewrite.
 enum Command {
     Lint { root: PathBuf, budget: DocBudget },
     Rewrite { root: PathBuf, mode: RewriteMode },

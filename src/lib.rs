@@ -127,26 +127,52 @@ impl DocLintOutcome {
     }
 }
 /// Per-file counters surfaced by the rewrite passes, aggregated across
-/// files in the run's `rewrite_summary` record. All fields default to
-/// zero; `#[non_exhaustive]` allows new counters without a breaking
-/// change. Construct with `RewriteCounts::default()` and update fields
-/// explicitly.
+/// files in the run's `rewrite_summary` record.
 ///
-/// - `comments_removed` — non-doc line and block comments dropped.
-/// - `inline_trimmed` — subset of `comments_removed`: mid-line
-///   (post-code) drops that trimmed trailing whitespace. Solo-line
-///   drops are excluded.
-/// - `blank_lines_collapsed` — symmetric-pad collapses, one per
-///   removed comment block with blanks on both sides.
-/// - `doc_links_rewritten` — splices applied by the doc-link idiom
-///   canonicaliser, one per rewritten literal span.
+/// The fields are private and there is no public constructor beyond
+/// [`Default`], so the subset relationships between them — notably
+/// `inline_trimmed` ⊆ `comments_removed` — cannot be violated from
+/// outside the crate.
+///
+/// - [`RewriteCounts::comments_removed`] — non-doc line and block
+///   comments dropped.
+/// - [`RewriteCounts::inline_trimmed`] — subset of `comments_removed`:
+///   mid-line (post-code) drops that trimmed trailing whitespace.
+///   Solo-line drops are excluded.
+/// - [`RewriteCounts::blank_lines_collapsed`] — symmetric-pad
+///   collapses, one per removed comment block with blanks on both
+///   sides.
+/// - [`RewriteCounts::doc_links_rewritten`] — splices applied by the
+///   doc-link idiom canonicaliser, one per rewritten literal span.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct RewriteCounts {
-    pub comments_removed: u32,
-    pub inline_trimmed: u32,
-    pub blank_lines_collapsed: u32,
-    pub doc_links_rewritten: u32,
+    comments_removed: u32,
+    inline_trimmed: u32,
+    blank_lines_collapsed: u32,
+    doc_links_rewritten: u32,
+}
+impl RewriteCounts {
+    /// Non-doc line and block comments dropped.
+    #[must_use]
+    pub const fn comments_removed(self) -> u32 {
+        self.comments_removed
+    }
+    /// Mid-line drops that trimmed trailing whitespace; a subset of
+    /// [`RewriteCounts::comments_removed`].
+    #[must_use]
+    pub const fn inline_trimmed(self) -> u32 {
+        self.inline_trimmed
+    }
+    /// Symmetric-pad blank-line collapses.
+    #[must_use]
+    pub const fn blank_lines_collapsed(self) -> u32 {
+        self.blank_lines_collapsed
+    }
+    /// Doc-link idiom splices applied.
+    #[must_use]
+    pub const fn doc_links_rewritten(self) -> u32 {
+        self.doc_links_rewritten
+    }
 }
 impl std::ops::AddAssign for RewriteCounts {
     fn add_assign(&mut self, rhs: Self) {
@@ -1367,20 +1393,20 @@ impl WordCount {
     }
 }
 /// A single doc-comment over-budget finding emitted by [`doc_lint_file`].
+///
+/// The count and its fail-closed provenance are one value, not a
+/// number beside a boolean that could contradict it.
 #[derive(Debug, Clone)]
 pub struct DocFinding {
     /// Human-readable label for the docced item, e.g. `"fn foo"` or `"struct Bar"`.
     pub item_label: String,
     /// Approximate source line of the docced item (from `proc_macro2` spans).
     pub line: usize,
-    /// Word count of the item's doc-comment prose (fenced code excluded).
-    pub word_count: usize,
+    /// Prose word count of the item's doc comment, carrying whether it
+    /// came from the fail-closed recount path.
+    pub words: WordCount,
     /// The budget the count exceeded.
     pub budget: usize,
-    /// True when `word_count` came from the fail-closed recount path
-    /// (unbalanced fence at EOF). `words=` is then an inflated number,
-    /// not the real prose count.
-    pub fail_closed: bool,
 }
 /// Lint `ast` for doc-comments whose prose word count exceeds `budget.max_words`.
 ///
@@ -1411,9 +1437,8 @@ impl DocLintVisitor {
             self.findings.push(DocFinding {
                 item_label: label.to_string(),
                 line: span_line.unwrap_or(attr_line),
-                word_count: words.count(),
+                words,
                 budget: self.budget.max_words,
-                fail_closed: words.is_fail_closed(),
             });
         }
     }
@@ -2139,7 +2164,7 @@ mod doc_lint_tests {
         };
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].word_count, 50);
+        assert_eq!(findings[0].words.count(), 50);
         assert_eq!(findings[0].budget, 40);
         assert_eq!(findings[0].item_label, "fn foo");
     }
@@ -2164,7 +2189,7 @@ mod doc_lint_tests {
         };
         let findings = lint(&f, 10);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].word_count, 15);
+        assert_eq!(findings[0].words.count(), 15);
     }
     #[test]
     fn cfg_attr_doc_payload_counted() {
@@ -2174,7 +2199,7 @@ mod doc_lint_tests {
         };
         let findings = lint(&f, 7);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].word_count, 10);
+        assert_eq!(findings[0].words.count(), 10);
     }
     #[test]
     fn doc_inside_macro_rules_not_linted() {
@@ -2218,7 +2243,7 @@ mod doc_lint_tests {
         };
         let findings = lint(&f, 10);
         assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].word_count, 11);
+        assert_eq!(findings[0].words.count(), 11);
     }
     #[test]
     fn equal_to_budget_does_not_trigger() {
@@ -2252,9 +2277,9 @@ mod doc_lint_tests {
         };
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].word_count, 56);
+        assert_eq!(findings[0].words.count(), 56);
         assert!(
-            findings[0].fail_closed,
+            findings[0].words.is_fail_closed(),
             "unbalanced fence must set fail_closed=true: {:?}",
             findings[0]
         );
@@ -2271,7 +2296,7 @@ mod doc_lint_tests {
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].item_label, "use");
-        assert_eq!(findings[0].word_count, 50);
+        assert_eq!(findings[0].words.count(), 50);
     }
     #[test]
     fn over_budget_doc_on_extern_crate_is_linted() {
@@ -2951,7 +2976,6 @@ mod record_tests {
             inline_trimmed: 1,
             blank_lines_collapsed: 2,
             doc_links_rewritten: 4,
-            ..RewriteCounts::default()
         };
         let line = rewrite_summary_record(RewriteMode::Write, &counts);
         assert!(

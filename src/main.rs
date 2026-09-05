@@ -361,9 +361,9 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
                 path,
                 finding.line,
                 &finding.item_label,
-                finding.word_count,
+                finding.words.count(),
                 finding.budget,
-                finding.fail_closed,
+                finding.words.is_fail_closed(),
             )
         );
     }
@@ -394,15 +394,15 @@ fn emit_doc_lint_hints(findings: &[(std::path::PathBuf, comment_free::DocFinding
     let mut sorted: Vec<&(std::path::PathBuf, comment_free::DocFinding)> =
         findings.iter().collect();
     sorted.sort_by(|(_, a), (_, b)| {
-        let oa = a.word_count.saturating_sub(a.budget);
-        let ob = b.word_count.saturating_sub(b.budget);
+        let oa = a.words.count().saturating_sub(a.budget);
+        let ob = b.words.count().saturating_sub(b.budget);
         ob.cmp(&oa)
     });
     let kept = sorted.iter().take(DOC_LINT_HINT_CAP);
     for (path, f) in kept {
         println!(
             "{}",
-            doc_lint_hint_record(kind, path, f.line, &f.item_label, f.word_count, f.budget)
+            doc_lint_hint_record(kind, path, f.line, &f.item_label, f.words.count(), f.budget)
         );
     }
     if sorted.len() > DOC_LINT_HINT_CAP {

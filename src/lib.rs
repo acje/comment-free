@@ -204,21 +204,36 @@ pub enum CommentFreeError {
 ///
 /// A walk failure is an indeterminate result, never the absence of a
 /// file: folding it into "no entry" lets a partial scan report zero
-/// errors. `path` is the entry that failed, falling back to the walk
-/// root when the underlying error carries none.
+/// errors. [`WalkError::path`] is the entry that failed, falling back
+/// to the walk root when the underlying error carries none.
+///
+/// The underlying [`walkdir`] error is deliberately not reachable
+/// through this type. It is retained as the [`std::error::Error`]
+/// source, so the error chain is intact, but it is not named in any
+/// signature: the traversal crate is an implementation choice, and
+/// exposing its error type would make swapping or major-bumping it a
+/// breaking change to this crate's API. Callers that need the text
+/// take [`WalkError::message`].
 #[derive(Debug, thiserror::Error)]
 #[error("cannot traverse {}: {source}", path.display())]
-#[non_exhaustive]
 pub struct WalkError {
-    pub path: PathBuf,
+    path: PathBuf,
     #[source]
-    pub source: walkdir::Error,
+    source: walkdir::Error,
 }
 impl WalkError {
-    /// Attribute `source` to the entry it failed on, or to `base` when
-    /// the underlying error carries no path.
+    /// The entry that could not be traversed.
     #[must_use]
-    pub fn rooted_at(base: &Path, source: walkdir::Error) -> Self {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    /// The underlying traversal failure rendered as operator-facing
+    /// text, for the `message` field of a `run_error` record.
+    #[must_use]
+    pub fn message(&self) -> String {
+        self.source.to_string()
+    }
+    fn rooted_at(base: &Path, source: walkdir::Error) -> Self {
         let path = source.path().unwrap_or(base).to_path_buf();
         Self { path, source }
     }
@@ -1309,6 +1324,64 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
 }
 /// Directories `scan_doc_files` and `.rs` traversal skip wholesale.
 pub const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
+/// Allowlisted source-tree directory names. `comment-free` is a Rust-only
+/// tool; only `.rs` files under one of these names anywhere in the path
+/// are eligible for traversal.
+const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
+/// Resolve `root` to the concrete directories [`walk_rs_files`] should descend.
+///
+/// If `root` itself sits inside (or is named) an allowlisted source dir, it
+/// is returned verbatim — the caller already targeted a Rust subtree.
+/// Otherwise `root` is treated as a project/workspace top: its immediate
+/// `crates/` and `src/` children (whichever exist) are returned. An empty
+/// result is valid and means "nothing to process".
+fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
+    let in_scope = root
+        .components()
+        .any(|c| matches!(c.as_os_str().to_str(), Some(n) if ALLOWED_ROOT_DIRS.contains(& n)));
+    if in_scope {
+        return vec![root.to_path_buf()];
+    }
+    ALLOWED_ROOT_DIRS
+        .iter()
+        .map(|d| root.join(d))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+/// Iterate every `.rs` file under `root`, yielding traversal failures
+/// rather than discarding them.
+///
+/// Restricts traversal to `.rs` under allowlisted Rust source roots
+/// (`crates/`, `src/`) — `comment-free` is a Rust-only tool. Within those
+/// roots, [`SKIP_DIRS`] (notably nested `target/`) still prune build output.
+/// An unreadable entry surfaces as [`WalkError`], never as "no entry".
+pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
+    resolve_walk_roots(root).into_iter().flat_map(|base| {
+        WalkDir::new(&base)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() == 0 {
+                    return true;
+                }
+                let name = e.file_name().to_string_lossy();
+                if e.file_type().is_dir()
+                    && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()))
+                {
+                    return false;
+                }
+                true
+            })
+            .filter_map(move |entry| match entry {
+                Err(e) => Some(Err(WalkError::rooted_at(&base, e))),
+                Ok(e) if e.file_type().is_file() => {
+                    let path = e.into_path();
+                    (path.extension().and_then(|s| s.to_str()) == Some("rs")).then_some(Ok(path))
+                }
+                Ok(_) => None,
+            })
+    })
+}
 /// True if `path` looks like documentation: doc file extension, bare
 /// README/LICENSE-style stem, or living under a top-level `docs/` / `doc/`
 /// directory directly beneath `root`.

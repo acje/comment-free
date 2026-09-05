@@ -3,14 +3,13 @@
 use clap::Parser;
 use comment_free::{
     CommentFreeError, DocBudget, DocLintKind, FileOutcome, RewriteCounts, RewriteMode,
-    RunErrorKind, SKIP_DIRS, WalkError, doc_file_warning_record, doc_lint_file,
-    doc_lint_finding_record, doc_lint_header_record, doc_lint_hint_record,
-    doc_lint_truncated_record, lint_summary_record, process_file, rewrite_file_record,
-    rewrite_summary_record, run_error_record, scan_doc_files, strip_summary_record,
+    RunErrorKind, doc_file_warning_record, doc_lint_file, doc_lint_finding_record,
+    doc_lint_header_record, doc_lint_hint_record, doc_lint_truncated_record, lint_summary_record,
+    process_file, rewrite_file_record, rewrite_summary_record, run_error_record, scan_doc_files,
+    strip_summary_record, walk_rs_files,
 };
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
-use walkdir::WalkDir;
 #[derive(Parser, Debug)]
 #[command(
     name = "comment-free",
@@ -178,64 +177,6 @@ fn run(opts: &Options) -> Result<u32, CommentFreeError> {
         run_lint(opts)
     }
 }
-/// Allowlisted source-tree directory names. `comment-free` is a Rust-only
-/// tool; only `.rs` files under one of these names anywhere in the path
-/// are eligible for traversal.
-const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
-/// Resolve `root` to the concrete directories `walk_rs_files` should descend.
-///
-/// If `root` itself sits inside (or is named) an allowlisted source dir, it
-/// is returned verbatim — the caller already targeted a Rust subtree.
-/// Otherwise `root` is treated as a project/workspace top: its immediate
-/// `crates/` and `src/` children (whichever exist) are returned. An empty
-/// result is valid and means "nothing to process".
-fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
-    let in_scope = root
-        .components()
-        .any(|c| matches!(c.as_os_str().to_str(), Some(n) if ALLOWED_ROOT_DIRS.contains(& n)));
-    if in_scope {
-        return vec![root.to_path_buf()];
-    }
-    ALLOWED_ROOT_DIRS
-        .iter()
-        .map(|d| root.join(d))
-        .filter(|p| p.is_dir())
-        .collect()
-}
-/// Iterate every `.rs` file under `root`, yielding traversal failures
-/// rather than discarding them.
-///
-/// Restricts traversal to `.rs` under allowlisted Rust source roots
-/// (`crates/`, `src/`) — `comment-free` is a Rust-only tool. Within those
-/// roots, `SKIP_DIRS` (notably nested `target/`) still prune build output.
-/// An unreadable entry surfaces as [`WalkError`], never as "no entry".
-fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
-    resolve_walk_roots(root).into_iter().flat_map(|base| {
-        WalkDir::new(&base)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                if e.depth() == 0 {
-                    return true;
-                }
-                let name = e.file_name().to_string_lossy();
-                if e.file_type().is_dir()
-                    && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()))
-                {
-                    return false;
-                }
-                true
-            })
-            .filter_map(move |entry| match entry {
-                Err(e) => Some(Err(WalkError::rooted_at(&base, e))),
-                Ok(e) if e.file_type().is_file() => {
-                    let path = e.into_path();
-                    (path.extension().and_then(|s| s.to_str()) == Some("rs")).then_some(Ok(path))
-                }
-                Ok(_) => None,
-            })
-    })
-}
 fn run_strip(opts: &Options) -> u32 {
     let mut errors = 0u32;
     let doc_scan = scan_doc_files(&opts.root);
@@ -246,7 +187,7 @@ fn run_strip(opts: &Options) -> u32 {
         errors += 1;
         eprintln!(
             "{}",
-            run_error_record(RunErrorKind::Walk, &e.path, &e.source.to_string())
+            run_error_record(RunErrorKind::Walk, e.path(), &e.message())
         );
     }
     let mode = if opts.dry_run {
@@ -266,7 +207,7 @@ fn run_strip(opts: &Options) -> u32 {
                 errors += 1;
                 eprintln!(
                     "{}",
-                    run_error_record(RunErrorKind::Walk, &e.path, &e.source.to_string())
+                    run_error_record(RunErrorKind::Walk, e.path(), &e.message())
                 );
                 continue;
             }
@@ -320,7 +261,7 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
                 errors += 1;
                 eprintln!(
                     "{}",
-                    run_error_record(RunErrorKind::Walk, &e.path, &e.source.to_string())
+                    run_error_record(RunErrorKind::Walk, e.path(), &e.message())
                 );
                 continue;
             }

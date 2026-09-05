@@ -30,6 +30,7 @@ walkdir = "2"
 similar = "3"
 
 [dev-dependencies]
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 tempfile = "3"
 
 [profile.release]

@@ -1237,20 +1237,7 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
     scan
 }
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
-// planted violation for the cf-06 bite proof: a non-doc comment
 const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
-/// Planted violation.
-///
-/// this doc block exists only to exceed the word budget so that the new
-/// continuous integration step has something real to fail on. it says the
-/// same thing many times over in plain prose. it says the same thing many
-/// times over in plain prose. it says the same thing many times over in
-/// plain prose. it says the same thing many times over in plain prose. it
-/// says the same thing many times over in plain prose. it says the same
-/// thing many times over in plain prose. it says the same thing many times
-/// over in plain prose. it says the same thing many times over in plain
-/// prose. it says the same thing many times over in plain prose. it says
-/// the same thing many times over in plain prose.
 fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
     let in_scope = root
         .components()

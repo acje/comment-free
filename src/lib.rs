@@ -251,6 +251,12 @@ impl WalkError {
             source: TraversalFailure(source.to_string()),
         }
     }
+    fn at(path: &Path, message: &str) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            source: TraversalFailure(message.to_owned()),
+        }
+    }
 }
 impl From<&CommentFreeError> for ExitCode {
     fn from(e: &CommentFreeError) -> Self {
@@ -1345,52 +1351,113 @@ pub fn scan_doc_files(root: &Path) -> DocScan {
 }
 const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];
 const ALLOWED_ROOT_DIRS: &[&str] = &["crates", "src"];
-fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
-    let in_scope = root
-        .components()
-        .any(|c| matches!(c.as_os_str().to_str(), Some(n) if ALLOWED_ROOT_DIRS.contains(& n)));
-    if in_scope {
-        return vec![root.to_path_buf()];
+const CARGO_MANIFEST: &str = "Cargo.toml";
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootScope {
+    SourceTree,
+    ProjectRoot,
+}
+fn is_named_source_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| ALLOWED_ROOT_DIRS.contains(&n))
+}
+fn source_dir_anchor(path: &Path) -> Result<ManifestAnchor, WalkError> {
+    match path.parent() {
+        Some(parent) if is_named_source_dir(path) => manifest_anchor(parent),
+        _ => Ok(ManifestAnchor::Absent),
     }
-    ALLOWED_ROOT_DIRS
-        .iter()
-        .map(|d| root.join(d))
-        .filter(|p| p.is_dir())
-        .collect()
+}
+const MANIFEST_NOT_A_FILE: &str =
+    "Cargo.toml is not a regular file, so source-root anchoring cannot be decided";
+#[derive(Debug, Clone, Copy)]
+enum ManifestAnchor {
+    Anchored,
+    Absent,
+}
+fn manifest_anchor(dir: &Path) -> Result<ManifestAnchor, WalkError> {
+    let manifest = dir.join(CARGO_MANIFEST);
+    match std::fs::symlink_metadata(&manifest) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ManifestAnchor::Absent),
+        Err(e) => Err(WalkError::at(&manifest, &e.to_string())),
+        Ok(node) if node.is_file() => Ok(ManifestAnchor::Anchored),
+        Ok(node) if node.is_symlink() => resolve_manifest_link(&manifest),
+        Ok(_) => Err(WalkError::at(&manifest, MANIFEST_NOT_A_FILE)),
+    }
+}
+fn resolve_manifest_link(manifest: &Path) -> Result<ManifestAnchor, WalkError> {
+    match std::fs::metadata(manifest) {
+        Ok(target) if target.is_file() => Ok(ManifestAnchor::Anchored),
+        Ok(_) => Err(WalkError::at(manifest, MANIFEST_NOT_A_FILE)),
+        Err(e) => Err(WalkError::at(manifest, &e.to_string())),
+    }
+}
+fn classify_root(root: &Path) -> Result<RootScope, WalkError> {
+    if is_named_source_dir(root) {
+        return Ok(RootScope::SourceTree);
+    }
+    for ancestor in root.ancestors() {
+        match source_dir_anchor(ancestor)? {
+            ManifestAnchor::Anchored => return Ok(RootScope::SourceTree),
+            ManifestAnchor::Absent => {}
+        }
+    }
+    Ok(RootScope::ProjectRoot)
+}
+fn resolve_walk_roots(root: &Path) -> Result<Vec<PathBuf>, WalkError> {
+    Ok(match classify_root(root)? {
+        RootScope::SourceTree => vec![root.to_path_buf()],
+        RootScope::ProjectRoot => ALLOWED_ROOT_DIRS
+            .iter()
+            .map(|d| root.join(d))
+            .filter(|p| p.is_dir())
+            .collect(),
+    })
 }
 /// Iterate every `.rs` file under `root`, yielding traversal failures
 /// rather than discarding them.
 ///
-/// Restricts traversal to `.rs` under allowlisted Rust source roots
-/// (`crates/`, `src/`) — `comment-free` is a Rust-only tool. Within those
-/// roots, build-output directories (notably nested `target/`) are still pruned.
-/// An unreadable entry surfaces as [`WalkError`], never as "no entry".
+/// Traversal is restricted to `.rs` under allowlisted source roots
+/// (`crates/`, `src/`). `root` is walked directly when so named, or
+/// when under one anchored by a sibling `Cargo.toml`; otherwise its
+/// allowlisted children are used. An ancestor merely *spelled* `src`
+/// never widens traversal. A manifest present but unresolvable to a
+/// regular file leaves anchoring undecided and surfaces as a
+/// [`WalkError`], never as scope. Build output is pruned.
 pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
-    resolve_walk_roots(root).into_iter().flat_map(|base| {
-        WalkDir::new(&base)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                if e.depth() == 0 {
-                    return true;
-                }
-                let name = e.file_name().to_string_lossy();
-                if e.file_type().is_dir()
-                    && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()))
-                {
-                    return false;
-                }
-                true
-            })
-            .filter_map(move |entry| match entry {
-                Err(e) => Some(Err(WalkError::rooted_at(&base, &e))),
-                Ok(e) if e.file_type().is_file() => {
-                    let path = e.into_path();
-                    (path.extension().and_then(|s| s.to_str()) == Some("rs")).then_some(Ok(path))
-                }
-                Ok(_) => None,
-            })
-    })
+    let (bases, undecided) = match resolve_walk_roots(root) {
+        Ok(bases) => (bases, None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+    undecided
+        .into_iter()
+        .map(Err)
+        .chain(bases.into_iter().flat_map(|base| {
+            WalkDir::new(&base)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| {
+                    if e.depth() == 0 {
+                        return true;
+                    }
+                    let name = e.file_name().to_string_lossy();
+                    if e.file_type().is_dir()
+                        && (name.starts_with('.') || SKIP_DIRS.contains(&name.as_ref()))
+                    {
+                        return false;
+                    }
+                    true
+                })
+                .filter_map(move |entry| match entry {
+                    Err(e) => Some(Err(WalkError::rooted_at(&base, &e))),
+                    Ok(e) if e.file_type().is_file() => {
+                        let path = e.into_path();
+                        (path.extension().and_then(|s| s.to_str()) == Some("rs"))
+                            .then_some(Ok(path))
+                    }
+                    Ok(_) => None,
+                })
+        }))
 }
 #[must_use]
 fn is_doc_path(path: &Path, root: &Path) -> bool {
@@ -1412,10 +1479,10 @@ fn is_doc_path(path: &Path, root: &Path) -> bool {
             return true;
         }
     }
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        let stem_uc = stem.to_ascii_uppercase();
+    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+        let name_uc = name.to_ascii_uppercase();
         for known in BARE_DOC_STEMS {
-            if stem_uc == *known {
+            if name_uc == *known {
                 return true;
             }
         }
@@ -4088,6 +4155,127 @@ mod doc_path_tests {
             root
         ));
         assert!(!is_doc_path(Path::new("/proj/src/doc/util.rs"), root));
+    }
+    #[test]
+    fn bare_doc_stem_does_not_match_a_non_doc_extension() {
+        let root = Path::new("");
+        assert!(is_doc_path(Path::new("README"), root));
+        assert!(is_doc_path(Path::new("LICENSE"), root));
+        assert!(is_doc_path(Path::new("NOTICE"), root));
+        assert!(!is_doc_path(Path::new("README.rs"), root));
+        assert!(!is_doc_path(Path::new("LICENSE.rs"), root));
+        assert!(!is_doc_path(Path::new("NOTICE.toml"), root));
+        assert!(!is_doc_path(Path::new("COPYING.rs"), root));
+        assert!(!is_doc_path(Path::new("CHANGELOG.rs"), root));
+        assert!(is_doc_path(Path::new("README.md"), root));
+        assert!(is_doc_path(Path::new("CHANGELOG.markdown"), root));
+    }
+}
+#[cfg(test)]
+mod walk_root_tests {
+    use super::{ManifestAnchor, RootScope, classify_root, resolve_walk_roots};
+    use std::path::{Path, PathBuf};
+    fn roots(path: &Path) -> Vec<PathBuf> {
+        resolve_walk_roots(path).expect("classification must be decidable")
+    }
+    #[test]
+    fn supplied_root_named_as_a_source_dir_is_walked_directly() {
+        assert_eq!(
+            roots(Path::new("/comment-free-no-such-root/proj/src")),
+            vec![PathBuf::from("/comment-free-no-such-root/proj/src")]
+        );
+        assert_eq!(
+            roots(Path::new("/comment-free-no-such-root/proj/crates")),
+            vec![PathBuf::from("/comment-free-no-such-root/proj/crates")]
+        );
+    }
+    #[test]
+    fn ancestor_named_as_a_source_dir_does_not_put_the_root_in_scope() {
+        assert!(
+            roots(Path::new("/comment-free-no-such-root/src/checkout")).is_empty(),
+            "an ancestor named src must not make the supplied root a source root"
+        );
+        assert!(
+            roots(Path::new("/comment-free-no-such-root/crates/checkout")).is_empty(),
+            "an ancestor named crates must not make the supplied root a source root"
+        );
+    }
+    #[test]
+    fn manifest_anchored_ancestor_makes_the_supplied_subtree_a_source_root() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = td.path();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
+        let module = repo.join("src/module");
+        std::fs::create_dir_all(&module).unwrap();
+        assert_eq!(
+            roots(&module),
+            vec![module.clone()],
+            "a subtree under a manifest-anchored src must be walked directly"
+        );
+        assert!(matches!(classify_root(&module), Ok(RootScope::SourceTree)));
+    }
+    #[test]
+    fn unanchored_ancestor_leaves_the_supplied_root_a_project_root() {
+        let td = tempfile::tempdir().unwrap();
+        let checkout = td.path().join("src/checkout");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        assert!(
+            matches!(classify_root(&checkout), Ok(RootScope::ProjectRoot)),
+            "an ancestor named src with no sibling Cargo.toml is ambient spelling, not intent"
+        );
+        assert_eq!(
+            roots(&checkout),
+            vec![checkout.join("src")],
+            "an unanchored root must fall back to its own allowlisted children"
+        );
+    }
+    #[test]
+    fn an_absent_manifest_is_a_decided_non_anchor() {
+        let td = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(
+                super::manifest_anchor(td.path()),
+                Ok(ManifestAnchor::Absent)
+            ),
+            "nothing at the manifest path decides the question: unanchored"
+        );
+    }
+    #[test]
+    fn a_manifest_that_is_a_directory_leaves_anchoring_undecided() {
+        let td = tempfile::tempdir().unwrap();
+        std::fs::create_dir(td.path().join(super::CARGO_MANIFEST)).unwrap();
+        let e = super::manifest_anchor(td.path())
+            .expect_err("a non-file manifest node must not yield a verdict");
+        assert!(
+            e.path().ends_with(super::CARGO_MANIFEST) && e.message() == super::MANIFEST_NOT_A_FILE,
+            "the error must name the undecidable manifest, got {e:?}"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_manifest_symlink_to_a_regular_file_anchors() {
+        let td = tempfile::tempdir().unwrap();
+        let real = td.path().join("real-manifest.toml");
+        std::fs::write(&real, "[package]\nname = \"p\"\n").unwrap();
+        std::os::unix::fs::symlink(&real, td.path().join(super::CARGO_MANIFEST)).unwrap();
+        assert!(matches!(
+            super::manifest_anchor(td.path()),
+            Ok(ManifestAnchor::Anchored)
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_manifest_symlink_leaves_anchoring_undecided() {
+        let td = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(
+            td.path().join("gone.toml"),
+            td.path().join(super::CARGO_MANIFEST),
+        )
+        .unwrap();
+        assert!(
+            super::manifest_anchor(td.path()).is_err(),
+            "a deliberate link to a missing target is not the absence of a manifest"
+        );
     }
 }
 #[cfg(test)]

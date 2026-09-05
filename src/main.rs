@@ -2,8 +2,8 @@
 #![warn(clippy::missing_const_for_fn)]
 use clap::Parser;
 use comment_free::{
-    CommentFreeError, DocBudget, DocLintKind, FileOutcome, ProcessOptions, RewriteCounts,
-    RewriteMode, RunErrorKind, SKIP_DIRS, WalkError, doc_file_warning_record, doc_lint_file,
+    CommentFreeError, DocBudget, DocLintKind, FileOutcome, RewriteCounts, RewriteMode,
+    RunErrorKind, SKIP_DIRS, WalkError, doc_file_warning_record, doc_lint_file,
     doc_lint_finding_record, doc_lint_header_record, doc_lint_hint_record,
     doc_lint_truncated_record, lint_summary_record, process_file, rewrite_file_record,
     rewrite_summary_record, run_error_record, scan_doc_files, strip_summary_record,
@@ -249,12 +249,10 @@ fn run_strip(opts: &Options) -> u32 {
             run_error_record(RunErrorKind::Walk, &e.path, &e.source.to_string())
         );
     }
-    let process_opts = ProcessOptions {
-        dry_run: opts.dry_run,
-        context: opts.context,
-    };
     let mode = if opts.dry_run {
-        RewriteMode::DryRun
+        RewriteMode::DryRun {
+            context: opts.context,
+        }
     } else {
         RewriteMode::Write
     };
@@ -273,7 +271,7 @@ fn run_strip(opts: &Options) -> u32 {
                 continue;
             }
         };
-        match process_file(&path, &process_opts) {
+        match process_file(&path, mode) {
             FileOutcome::Rewritten { diff, counts } => {
                 rewritten += 1;
                 counts_total += counts;

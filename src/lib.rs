@@ -64,13 +64,20 @@ pub const DIAGNOSTIC_RECORD_GRAMMAR: &str = "\
 {\"record\":\"strip_summary\",\"v\":<N>,\"mode\":<MODE>,\"rewritten\":<U32>,\"unchanged\":<U32>,\"errors\":<U32>}
 {\"record\":\"lint_summary\",\"v\":<N>,\"files\":<U32>,\"findings\":<U32>,\"errors\":<U32>}";
 /// Which pass a `--rewrite` run made over the tree.
+///
+/// The unified-diff context width is carried by [`RewriteMode::DryRun`]
+/// alone, so a write-mode run cannot name a diff width it will never
+/// render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RewriteMode {
     /// Files were replaced on disk.
     Write,
     /// Diffs were printed and no file was touched.
-    DryRun,
+    DryRun {
+        /// Unified-diff context line count.
+        context: usize,
+    },
 }
 impl RewriteMode {
     /// The `mode` field value carried by emitted records.
@@ -78,7 +85,7 @@ impl RewriteMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Write => "write",
-            Self::DryRun => "dry-run",
+            Self::DryRun { .. } => "dry-run",
         }
     }
 }
@@ -549,20 +556,14 @@ pub fn lint_summary_record(files: u32, findings: u32, errors: u32) -> String {
     out.push('}');
     out
 }
-/// Knobs [`process_file`] reads. `main.rs`'s clap `Options` is intentionally a
-/// superset; this trims the surface to what the pure logic actually needs.
-pub struct ProcessOptions {
-    pub dry_run: bool,
-    pub context: usize,
-}
 /// Process `path`: doc-comment link-idiom canonicalisation + lexer-based
 /// non-doc comment strip. Byte-preserving outside targets; code
 /// formatting and whitespace outside comments are untouched.
 ///
 /// Returns:
 ///
-/// - [`FileOutcome::Rewritten`] — content changed (unified diff in
-///   `dry_run` mode, `None` otherwise).
+/// - [`FileOutcome::Rewritten`] — content changed (unified diff under
+///   [`RewriteMode::DryRun`], `None` under [`RewriteMode::Write`]).
 /// - [`FileOutcome::Unchanged`] — no bytes changed.
 /// - [`FileOutcome::ParseError`] — syn parse for the doc-link pass
 ///   failed; file left untouched on disk.
@@ -583,7 +584,7 @@ pub struct ProcessOptions {
 /// Stripped: every ordinary `//` line and `/* */` block comment.
 /// Preserved: doc comments (`///`, `//!`, `/** */`, `/*! */`).
 #[must_use]
-pub fn process_file(path: &Path, opts: &ProcessOptions) -> FileOutcome {
+pub fn process_file(path: &Path, mode: RewriteMode) -> FileOutcome {
     let original = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => return FileOutcome::IoError(e.to_string()),
@@ -604,20 +605,21 @@ pub fn process_file(path: &Path, opts: &ProcessOptions) -> FileOutcome {
     if rewritten == original {
         return FileOutcome::Unchanged { counts };
     }
-    if opts.dry_run {
-        let diff = unified_diff(path, &original, &rewritten, opts.context);
-        FileOutcome::Rewritten {
-            diff: Some(diff),
-            counts,
+    match mode {
+        RewriteMode::DryRun { context } => {
+            let diff = unified_diff(path, &original, &rewritten, context);
+            FileOutcome::Rewritten {
+                diff: Some(diff),
+                counts,
+            }
         }
-    } else {
-        match write_atomically(path, &original, &rewritten) {
+        RewriteMode::Write => match write_atomically(path, &original, &rewritten) {
             Ok(()) => FileOutcome::Rewritten { diff: None, counts },
             Err(WriteError::Conflict) => FileOutcome::Conflict,
             Err(e @ (WriteError::SymlinkDestination | WriteError::Io(_))) => {
                 FileOutcome::IoError(e.to_string())
             }
-        }
+        },
     }
 }
 /// Strip non-doc line and block comments from `src` using
@@ -1633,15 +1635,11 @@ fn impl_item_label_and_attrs(item: &syn::ImplItem) -> Option<(String, &[Attribut
 #[cfg(test)]
 mod atomic_write_tests {
     use super::{
-        FileOutcome, ProcessOptions, WriteError, create_sibling_temp, process_file,
-        write_atomically,
+        FileOutcome, RewriteMode, WriteError, create_sibling_temp, process_file, write_atomically,
     };
     use std::fs;
-    fn write_opts() -> ProcessOptions {
-        ProcessOptions {
-            dry_run: false,
-            context: 3,
-        }
+    const fn write_opts() -> RewriteMode {
+        RewriteMode::Write
     }
     fn dir_entry_names(dir: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(dir)
@@ -1673,7 +1671,7 @@ mod atomic_write_tests {
             write_atomically(&path, "stale bytes\n", "never lands\n"),
             Err(WriteError::Conflict)
         ));
-        match process_file(&path, &write_opts()) {
+        match process_file(&path, write_opts()) {
             FileOutcome::Rewritten { .. } => {}
             other => panic!("expected Rewritten after a conflict, got {other:?}"),
         }
@@ -1685,7 +1683,7 @@ mod atomic_write_tests {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("a.rs");
         fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
-        match process_file(&path, &write_opts()) {
+        match process_file(&path, write_opts()) {
             FileOutcome::Rewritten { .. } => {}
             other => panic!("expected Rewritten, got {other:?}"),
         }
@@ -1700,7 +1698,7 @@ mod atomic_write_tests {
         let path = td.path().join("a.rs");
         fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-        match process_file(&path, &write_opts()) {
+        match process_file(&path, write_opts()) {
             FileOutcome::Rewritten { .. } => {}
             other => panic!("expected Rewritten, got {other:?}"),
         }
@@ -1715,7 +1713,7 @@ mod atomic_write_tests {
         let link = td.path().join("link.rs");
         fs::write(&target, "// drop me\nfn f() {}\n").unwrap();
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        match process_file(&link, &write_opts()) {
+        match process_file(&link, write_opts()) {
             FileOutcome::IoError(msg) => assert!(msg.contains("symbolic link"), "got {msg}"),
             other => panic!("expected IoError, got {other:?}"),
         }
@@ -1760,20 +1758,17 @@ mod atomic_write_tests {
 }
 #[cfg(test)]
 mod process_file_tests {
-    use super::{FileOutcome, ProcessOptions, process_file, strip_line_comments};
+    use super::{FileOutcome, RewriteMode, process_file, strip_line_comments};
     use std::fs;
-    fn opts() -> ProcessOptions {
-        ProcessOptions {
-            dry_run: true,
-            context: 3,
-        }
+    const fn opts() -> RewriteMode {
+        RewriteMode::DryRun { context: 3 }
     }
     #[test]
     fn whitespace_only_file_is_unchanged() {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("a.rs");
         fs::write(&path, "   \n\t\n  \n").unwrap();
-        match process_file(&path, &opts()) {
+        match process_file(&path, opts()) {
             FileOutcome::Unchanged { .. } => {}
             other => panic!("expected Unchanged for whitespace-only file, got {other:?}"),
         }
@@ -1783,7 +1778,7 @@ mod process_file_tests {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("a.rs");
         fs::write(&path, "").unwrap();
-        match process_file(&path, &opts()) {
+        match process_file(&path, opts()) {
             FileOutcome::Unchanged { .. } => {}
             other => panic!("expected Unchanged for empty file, got {other:?}"),
         }
@@ -1793,7 +1788,7 @@ mod process_file_tests {
         let td = tempfile::tempdir().unwrap();
         let path = td.path().join("a.rs");
         fs::write(&path, "// SAFETY: pointer is valid\nfn f() {}\n").unwrap();
-        match process_file(&path, &opts()) {
+        match process_file(&path, opts()) {
             FileOutcome::Rewritten { counts, .. } => {
                 assert_eq!(counts.comments_removed, 1);
             }
@@ -2893,7 +2888,10 @@ mod record_tests {
     }
     #[test]
     fn rewrite_summary_record_names_dry_run_mode() {
-        let line = rewrite_summary_record(RewriteMode::DryRun, &RewriteCounts::default());
+        let line = rewrite_summary_record(
+            RewriteMode::DryRun { context: 3 },
+            &RewriteCounts::default(),
+        );
         assert!(line.contains("\"mode\":\"dry-run\""), "{line}");
     }
     #[test]

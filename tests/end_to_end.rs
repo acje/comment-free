@@ -1985,3 +1985,76 @@ fn version_flag_exits_zero_and_prints_crate_version() {
         "expected --version output to contain the crate version:\n{stdout}"
     );
 }
+#[cfg(unix)]
+fn make_unreadable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    assert!(
+        fs::read_dir(dir).is_err(),
+        "precondition: {} must be unreadable (are you running as root?)",
+        dir.display()
+    );
+}
+#[cfg(unix)]
+fn make_readable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+}
+#[cfg(unix)]
+#[test]
+fn lint_mode_counts_unreadable_directory_as_error_and_exits_5() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a.rs", "fn f() {}\n");
+    let locked = td.path().join("src").join("locked");
+    fs::create_dir_all(&locked).expect("mkdir locked");
+    make_unreadable(&locked);
+    let out = Command::new(bin())
+        .arg(td.path())
+        .output()
+        .expect("failed to spawn comment-free");
+    make_readable(&locked);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "unreadable directory must exit 5, not clean:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("WALK_ERROR") && stderr.contains("locked"),
+        "expected a WALK_ERROR record naming the unreadable path:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("errors=1"),
+        "expected the run error count to include the walk error:\n{stderr}"
+    );
+}
+#[cfg(unix)]
+#[test]
+fn doc_scan_counts_unreadable_directory_as_error_and_exits_5() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a.rs", "fn f() {}\n");
+    let locked = td.path().join("locked");
+    fs::create_dir_all(&locked).expect("mkdir locked");
+    make_unreadable(&locked);
+    let out = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(td.path())
+        .output()
+        .expect("failed to spawn comment-free");
+    make_readable(&locked);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "unreadable documentation-scan directory must exit 5, not clean:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("WALK_ERROR") && stderr.contains("locked"),
+        "expected a WALK_ERROR record naming the unreadable path:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("errors=1"),
+        "expected the run error count to include the doc-scan walk error:\n{stderr}"
+    );
+}

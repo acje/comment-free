@@ -3,8 +3,8 @@
 use clap::Parser;
 use comment_free::{
     CommentFreeError, DOC_LINT_DOCTRINE_MSG, DOC_LINT_RECORD_VERSION, DocBudget, FileOutcome,
-    ProcessOptions, REWRITE_RECORD_VERSION, RewriteCounts, SKIP_DIRS, doc_lint_file, process_file,
-    scan_doc_files,
+    ProcessOptions, REWRITE_RECORD_VERSION, RewriteCounts, SKIP_DIRS, WalkError, doc_lint_file,
+    process_file, scan_doc_files,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -59,7 +59,8 @@ use walkdir::WalkDir;
                     1  catastrophic / unmapped IO error\n\
                     2  invalid CLI arguments (clap rejection)\n\
                     4  doc-lint findings observed (default mode)\n\
-                    5  per-file parse/IO errors observed during processing (both modes)\n\
+                    5  per-file parse/IO errors, or directory-traversal errors\n\
+                       (WALK_ERROR), observed during processing (both modes)\n\
                   \n\
                   Output streams: findings (DOC_LINT, REWRITE, WOULD_REWRITE, diffs) on \
                   stdout; metadata (SUMMARY, DOC_WARN, errors) on stderr."
@@ -155,14 +156,16 @@ fn resolve_walk_roots(root: &Path) -> Vec<PathBuf> {
         .filter(|p| p.is_dir())
         .collect()
 }
-/// Iterate every `.rs` file under `root`, ignoring traversal errors.
+/// Iterate every `.rs` file under `root`, yielding traversal failures
+/// rather than discarding them.
 ///
 /// Restricts traversal to `.rs` under allowlisted Rust source roots
 /// (`crates/`, `src/`) — `comment-free` is a Rust-only tool. Within those
 /// roots, `SKIP_DIRS` (notably nested `target/`) still prune build output.
-fn walk_rs_files(root: &Path) -> impl Iterator<Item = PathBuf> + use<'_> {
+/// An unreadable entry surfaces as [`WalkError`], never as "no entry".
+fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
     resolve_walk_roots(root).into_iter().flat_map(|base| {
-        WalkDir::new(base)
+        WalkDir::new(&base)
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
@@ -177,21 +180,30 @@ fn walk_rs_files(root: &Path) -> impl Iterator<Item = PathBuf> + use<'_> {
                 }
                 true
             })
-            .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_file())
-            .map(walkdir::DirEntry::into_path)
-            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rs"))
+            .filter_map(move |entry| match entry {
+                Err(e) => Some(Err(WalkError::rooted_at(&base, e))),
+                Ok(e) if e.file_type().is_file() => {
+                    let path = e.into_path();
+                    (path.extension().and_then(|s| s.to_str()) == Some("rs")).then_some(Ok(path))
+                }
+                Ok(_) => None,
+            })
     })
 }
 fn run_strip(opts: &Options) -> u32 {
-    let doc_warnings = scan_doc_files(&opts.root);
-    for path in &doc_warnings {
+    let mut errors = 0u32;
+    let doc_scan = scan_doc_files(&opts.root);
+    for path in &doc_scan.files {
         eprintln!("DOC_WARN\t{}", path.display());
     }
-    if !doc_warnings.is_empty() {
+    for e in &doc_scan.errors {
+        errors += 1;
+        eprintln!("WALK_ERROR\t{}\t{}", e.path.display(), e.source);
+    }
+    if !doc_scan.files.is_empty() {
         eprintln!(
             "warning: {} documentation file(s) found under {}; they will NOT be modified",
-            doc_warnings.len(),
+            doc_scan.files.len(),
             opts.root.display()
         );
     }
@@ -201,9 +213,16 @@ fn run_strip(opts: &Options) -> u32 {
     };
     let mut rewritten = 0u32;
     let mut unchanged = 0u32;
-    let mut errors = 0u32;
     let mut counts_total = RewriteCounts::default();
-    for path in walk_rs_files(&opts.root) {
+    for walked in walk_rs_files(&opts.root) {
+        let path = match walked {
+            Ok(p) => p,
+            Err(e) => {
+                errors += 1;
+                eprintln!("WALK_ERROR\t{}\t{}", e.path.display(), e.source);
+                continue;
+            }
+        };
         match process_file(&path, &process_opts) {
             FileOutcome::Rewritten { diff, counts } => {
                 rewritten += 1;
@@ -279,7 +298,15 @@ fn run_lint(opts: &Options) -> Result<u32, CommentFreeError> {
     let mut all_findings: Vec<(std::path::PathBuf, comment_free::DocFinding)> = Vec::new();
     let mut errors = 0u32;
     let mut files_scanned = 0u32;
-    for path in walk_rs_files(&opts.root) {
+    for walked in walk_rs_files(&opts.root) {
+        let path = match walked {
+            Ok(p) => p,
+            Err(e) => {
+                errors += 1;
+                eprintln!("WALK_ERROR\t{}\t{}", e.path.display(), e.source);
+                continue;
+            }
+        };
         files_scanned += 1;
         let source = match std::fs::read_to_string(&path) {
             Ok(s) => s,

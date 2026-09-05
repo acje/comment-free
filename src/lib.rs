@@ -125,6 +125,29 @@ pub enum CommentFreeError {
     #[error("doc lint failure")]
     DocLintFailure,
 }
+/// A directory-traversal failure, preserved rather than skipped.
+///
+/// A walk failure is an indeterminate result, never the absence of a
+/// file: folding it into "no entry" lets a partial scan report zero
+/// errors. `path` is the entry that failed, falling back to the walk
+/// root when the underlying error carries none.
+#[derive(Debug, thiserror::Error)]
+#[error("cannot traverse {}: {source}", path.display())]
+#[non_exhaustive]
+pub struct WalkError {
+    pub path: PathBuf,
+    #[source]
+    pub source: walkdir::Error,
+}
+impl WalkError {
+    /// Attribute `source` to the entry it failed on, or to `base` when
+    /// the underlying error carries no path.
+    #[must_use]
+    pub fn rooted_at(base: &Path, source: walkdir::Error) -> Self {
+        let path = source.path().unwrap_or(base).to_path_buf();
+        Self { path, source }
+    }
+}
 impl From<&CommentFreeError> for ExitCode {
     fn from(e: &CommentFreeError) -> Self {
         match e {
@@ -824,13 +847,25 @@ pub fn is_cfg_attr(attr: &Attribute) -> bool {
         _ => false,
     }
 }
-/// Walk `root` and return every file path that looks like documentation.
+/// Result of [`scan_doc_files`]: the documentation files found, plus
+/// every traversal failure encountered. Callers must count `errors`
+/// towards the run error total; a scan that could not read part of the
+/// tree has not established that the tree is clean.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct DocScan {
+    pub files: Vec<PathBuf>,
+    pub errors: Vec<WalkError>,
+}
+/// Walk `root` and report every file that looks like documentation,
+/// together with every traversal failure.
 ///
 /// Skips dotfiles/dotdirs, `target/`, and common vendor/build directories
 /// (`node_modules`, `vendor`, `dist`, `build`) to avoid polyglot-repo noise.
+/// Unreadable entries are reported in [`DocScan::errors`], never dropped.
 #[must_use]
-pub fn scan_doc_files(root: &Path) -> Vec<PathBuf> {
-    let mut hits = Vec::new();
+pub fn scan_doc_files(root: &Path) -> DocScan {
+    let mut scan = DocScan::default();
     let walker = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -846,16 +881,16 @@ pub fn scan_doc_files(root: &Path) -> Vec<PathBuf> {
             }
             true
         });
-    for entry in walker.filter_map(Result::ok) {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if is_doc_path(path, root) {
-            hits.push(path.to_path_buf());
+    for entry in walker {
+        match entry {
+            Err(e) => scan.errors.push(WalkError::rooted_at(root, e)),
+            Ok(entry) if entry.file_type().is_file() && is_doc_path(entry.path(), root) => {
+                scan.files.push(entry.into_path());
+            }
+            Ok(_) => {}
         }
     }
-    hits
+    scan
 }
 /// Directories `scan_doc_files` and `.rs` traversal skip wholesale.
 pub const SKIP_DIRS: &[&str] = &["target", "node_modules", "vendor", "dist", "build"];

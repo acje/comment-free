@@ -763,7 +763,7 @@ pub enum ReportScope {
     File,
     /// Cargo source allowlist at the selected root.
     ProjectAllowlist,
-    /// Recursive Rust traversal below an explicit directory.
+    /// Recursive Rust traversal below the selected directory, including cwd.
     RecursiveDirectory,
     /// The manifest probe could not establish a traversal policy.
     Unresolved,
@@ -1821,16 +1821,15 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
 /// How a CLI directory root was selected; neither choice discovers ancestors.
 #[derive(Debug, Clone, Copy)]
 pub enum DirectorySelection {
-    /// Omitted ROOT: scan only project-allowlisted children of cwd.
+    /// Omitted ROOT: recursively scan cwd.
     DefaultCwd,
-    /// Supplied ROOT: recurse unless its own Cargo.toml selects the allowlist.
+    /// Supplied ROOT: recursively scan the selected directory.
     Explicit,
 }
 
 /// Iterate Rust sources in a CLI directory scope, preserving pruning and link policy.
-/// Invalid or inaccessible manifests and traversal failures yield [`WalkError`].
-/// A manifest at the supplied root selects project-allowlisted children even
-/// when that root is named `src`; no ancestor manifests are consulted.
+/// All directory roots recurse, regardless of manifests; no ancestors are consulted.
+/// Traversal failures and nested source-hiding links yield [`WalkError`].
 pub fn walk_cli_directory(
     root: &Path,
     selection: DirectorySelection,
@@ -1839,27 +1838,19 @@ pub fn walk_cli_directory(
 }
 
 /// Resolve a directory scan once, returning its selected policy and traversal.
-/// Policy is `project-allowlist`, `recursive-directory`, or `unresolved` when
-/// the manifest probe fails. The iterator preserves that failure as a [`WalkError`].
+/// Policy is always [`ReportScope::RecursiveDirectory`]. The iterator preserves
+/// traversal failures as [`WalkError`]; manifests do not select CLI scope.
 pub fn plan_cli_directory(
     root: &Path,
-    selection: DirectorySelection,
+    _selection: DirectorySelection,
 ) -> (
     ReportScope,
     impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_>,
 ) {
-    let (policy, roots) = match (selection, manifest_anchor(root)) {
-        (_, Err(error)) => (ReportScope::Unresolved, Err(error)),
-        (DirectorySelection::DefaultCwd, Ok(_))
-        | (DirectorySelection::Explicit, Ok(ManifestAnchor::Anchored)) => {
-            (ReportScope::ProjectAllowlist, project_walk_roots(root))
-        }
-        (DirectorySelection::Explicit, Ok(ManifestAnchor::Absent)) => (
-            ReportScope::RecursiveDirectory,
-            Ok(vec![root.to_path_buf()]),
-        ),
-    };
-    (policy, walk_resolved_roots(roots))
+    (
+        ReportScope::RecursiveDirectory,
+        walk_resolved_roots(Ok(vec![root.to_path_buf()])),
+    )
 }
 
 fn walk_resolved_roots(

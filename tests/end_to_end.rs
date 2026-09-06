@@ -218,7 +218,7 @@ fn summary_names_the_selected_policy_not_just_the_argument_form() {
     fs::write(td.path().join("Cargo.toml"), "[workspace]\n").unwrap();
     let out = run_lint_budget(td.path(), 5);
     let summary = one_record(&String::from_utf8_lossy(&out.stderr), "lint_summary");
-    assert_eq!(summary.text("scope"), "project-allowlist");
+    assert_eq!(summary.text("scope"), "recursive-directory");
 }
 
 #[test]
@@ -412,7 +412,7 @@ fn explicit_source_directory_link_retains_traversal() {
 }
 
 #[test]
-fn explicit_arbitrary_directory_recurses_but_default_cwd_uses_allowlist() {
+fn explicit_and_default_directories_recurse_without_manifest_dependency() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path().join("custom");
     fs::create_dir_all(root.join("nested")).unwrap();
@@ -424,17 +424,17 @@ fn explicit_arbitrary_directory_recurses_but_default_cwd_uses_allowlist() {
         .current_dir(&root)
         .output()
         .unwrap();
-    assert_eq!(default.status.code(), Some(0), "{default:?}");
+    assert_pending_changes(&default, "default cwd must recurse");
     assert_eq!(
         one_record(&String::from_utf8_lossy(&default.stderr), "strip_summary").number("rewritten"),
-        0
+        1
     );
     fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
-    assert_eq!(run_dry(&root).status.code(), Some(0));
+    assert_pending_changes(&run_dry(&root), "manifest must not narrow recursion");
 }
 
 #[test]
-fn explicit_manifest_root_named_src_still_uses_project_allowlist() {
+fn explicit_manifest_root_named_src_includes_root_sources() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path().join("src");
     fs::create_dir_all(root.join("src")).unwrap();
@@ -445,7 +445,7 @@ fn explicit_manifest_root_named_src_still_uses_project_allowlist() {
     assert_pending_changes(&out, "manifest root must scan src/lib.rs");
     assert_eq!(
         rewritten_paths(&String::from_utf8_lossy(&out.stdout)).len(),
-        1
+        2
     );
 }
 
@@ -467,6 +467,74 @@ fn arbitrary_directory_scope_is_shared_by_lint_and_write_without_ancestor_discov
         fs::read_to_string(selected).unwrap(),
         original.replace("// removable\n", "")
     );
+}
+
+#[test]
+fn recursive_scope_includes_custom_sources_and_prunes_hidden_and_build_directories() {
+    for manifest in [false, true] {
+        for explicit in [false, true] {
+            let td = tempfile::tempdir().unwrap();
+            let root = td.path().join("checkout");
+            fs::create_dir(&root).unwrap();
+            let original = "// removable\n/// one two three four five six\npub fn item() {}\n";
+            fs::write(td.path().join("outside.rs"), "fn invalid( {").unwrap();
+            for name in ["main.rs", "tools/task.rs", "scripts/check.rs", "src/lib.rs"] {
+                let file = root.join(name);
+                fs::create_dir_all(file.parent().unwrap()).unwrap();
+                fs::write(file, original).unwrap();
+            }
+            for name in [
+                ".git",
+                ".beads",
+                "target",
+                "BUILD",
+                "vendor",
+                "dist",
+                "node_modules",
+            ] {
+                fs::create_dir(root.join(name)).unwrap();
+                fs::write(root.join(name).join("ignored.rs"), "fn invalid( {").unwrap();
+            }
+            if manifest {
+                fs::write(root.join("Cargo.toml"), "not a valid manifest").unwrap();
+            }
+            for (args, expected) in [
+                (vec!["--doc-max-words", "5", "--max-warning-files", "0"], 4),
+                (vec!["--rewrite", "--dry-run"], 3),
+                (vec!["--rewrite"], 0),
+            ] {
+                let mut command = Command::new(bin());
+                command.current_dir(&root).args(args);
+                if explicit {
+                    command.arg(".");
+                }
+                let out = command.output().unwrap();
+                assert_eq!(
+                    out.status.code(),
+                    Some(expected),
+                    "{manifest}/{explicit}: {out:?}"
+                );
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if expected == 4 {
+                    let summary = one_record(&stderr, "lint_summary");
+                    assert_eq!(summary.text("scope"), "recursive-directory");
+                    assert_eq!(summary.number("files"), 4);
+                    assert_eq!(summary.number("findings_hidden"), 4);
+                    assert!(out.stdout.is_empty());
+                } else {
+                    assert_eq!(one_record(&stderr, "strip_summary").number("rewritten"), 4);
+                }
+                for name in ["main.rs", "tools/task.rs", "scripts/check.rs", "src/lib.rs"] {
+                    let wanted = if expected == 0 {
+                        original.replace("// removable\n", "")
+                    } else {
+                        original.to_owned()
+                    };
+                    assert_eq!(fs::read_to_string(root.join(name)).unwrap(), wanted);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2133,7 +2201,7 @@ fn lint_custom_budget_honoured() {
     assert_eq!(finding.number("words"), 6, "{stdout}");
 }
 #[test]
-fn dry_run_processes_crates_and_src_but_skips_target_and_docs() {
+fn dry_run_processes_all_rust_directories_but_skips_target() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
     fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
@@ -2167,15 +2235,13 @@ fn dry_run_processes_crates_and_src_but_skips_target_and_docs() {
         paths.iter().any(|p| p.contains("crates/foo/src/lib.rs")),
         "expected a crates/foo/src/lib.rs rewrite_file record:\n{stdout}"
     );
-    for forbidden in ["target/package", "docs/example.rs", "scripts/helper.rs"] {
-        assert!(
-            !stdout.contains(forbidden),
-            "unexpected out-of-scope path `{forbidden}` in dry-run output:\n{stdout}"
-        );
+    for included in ["docs/example.rs", "scripts/helper.rs"] {
+        assert!(paths.iter().any(|p| p.ends_with(included)), "{stdout}");
     }
+    assert!(!stdout.contains("target/package"));
 }
 #[test]
-fn lint_processes_crates_and_src_but_skips_target_and_docs() {
+fn lint_processes_docs_rust_sources_but_skips_target() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
     fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
@@ -2203,19 +2269,17 @@ fn lint_processes_crates_and_src_but_skips_target_and_docs() {
     assert_eq!(
         out.status.code(),
         Some(4),
-        "expected exit 4 (one in-scope finding); stdout:\n{stdout}\nstderr:\n{stderr}"
+        "expected exit 4 (two findings, one shown); stdout:\n{stdout}\nstderr:\n{stderr}"
     );
     let finding = one_record(&stdout, "doc_lint_finding");
     assert!(
-        finding.text("path").ends_with("src/lib.rs"),
-        "expected the finding to cite src/lib.rs:\n{stdout}"
+        finding.text("path").ends_with("docs/example.rs"),
+        "expected first finding in native path order:\n{stdout}"
     );
-    for forbidden in ["target/package", "docs/example.rs"] {
-        assert!(
-            !stdout.contains(forbidden),
-            "out-of-scope path `{forbidden}` leaked into lint output:\n{stdout}"
-        );
-    }
+    assert!(!stdout.contains("target/package"));
+    let summary = one_record(&stderr, "lint_summary");
+    assert_eq!(summary.number("findings"), 2);
+    assert_eq!(summary.number("findings_hidden"), 1);
 }
 #[test]
 fn non_rust_files_under_allowed_roots_are_ignored() {
@@ -2240,7 +2304,7 @@ fn non_rust_files_under_allowed_roots_are_ignored() {
     }
 }
 #[test]
-fn root_without_crates_or_src_processes_nothing() {
+fn root_without_conventional_source_directories_still_processes_rust() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
     fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
@@ -2250,15 +2314,8 @@ fn root_without_crates_or_src_processes_nothing() {
     let out = run_dry(root);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "exit {:?}\nstderr:\n{stderr}",
-        out.status.code()
-    );
-    assert!(
-        rewritten_paths(&stdout).is_empty(),
-        "no rewrites expected when root has no allowed source tree:\n{stdout}"
-    );
+    assert_pending_changes(&out, "root and docs Rust sources are in scope");
+    assert_eq!(rewritten_paths(&stdout).len(), 2);
     let summary = one_record(&stderr, "strip_summary");
     assert_eq!(
         (
@@ -2266,8 +2323,8 @@ fn root_without_crates_or_src_processes_nothing() {
             summary.number("unchanged"),
             summary.number("errors")
         ),
-        (0, 0, 0),
-        "summary should reflect zero work:\n{stderr}"
+        (2, 0, 0),
+        "summary should reflect recursive scope:\n{stderr}"
     );
 }
 #[test]
@@ -2506,12 +2563,12 @@ fn supplied_subtree_below_src_is_processed_while_ambient_ancestry_is_not() {
         .output()
         .expect("failed to spawn comment-free");
     let ambient_out = String::from_utf8_lossy(&ambient.stdout);
-    assert!(ambient.status.success(), "exit {:?}", ambient.status.code());
+    assert_pending_changes(&ambient, "cwd includes all descendants");
     assert!(
-        !rewritten_paths(&ambient_out)
+        rewritten_paths(&ambient_out)
             .iter()
             .any(|p| p.ends_with("stray.rs")),
-        "an ancestor merely spelled src, anchored by no manifest, must not widen traversal:\n{ambient_out}"
+        "cwd root sources must be included without a manifest:\n{ambient_out}"
     );
 }
 #[test]
@@ -2522,6 +2579,11 @@ fn ancestor_named_src_does_not_widen_the_supplied_root() {
     fs::write(scoped.join("Cargo.toml"), "[workspace]\n").unwrap();
     fs::write(scoped.join("src/lib.rs"), "// removable\nfn c() {}\n").expect("write lib");
     fs::write(scoped.join("stray.rs"), "// removable\nfn s() {}\n").expect("write stray");
+    fs::write(
+        td.path().join("src/outside.rs"),
+        "// removable\nfn outside() {}\n",
+    )
+    .unwrap();
     let out = Command::new(bin())
         .arg("--rewrite")
         .arg("--dry-run")
@@ -2539,9 +2601,10 @@ fn ancestor_named_src_does_not_widen_the_supplied_root() {
         "expected the supplied root's own src/lib.rs:\n{stdout}"
     );
     assert!(
-        !paths.iter().any(|p| p.ends_with("stray.rs")),
-        "an ancestor named src must not widen traversal to the whole supplied root:\n{stdout}"
+        paths.iter().any(|p| p.ends_with("stray.rs")),
+        "root sources must be included:\n{stdout}"
     );
+    assert!(!paths.iter().any(|p| p.ends_with("outside.rs")));
 }
 fn manifest_policy_fixture(td: &Path) -> std::path::PathBuf {
     let repo = td.join("repo");
@@ -2572,7 +2635,7 @@ fn absent_manifest_does_not_hide_an_explicit_subtree() {
     );
 }
 #[test]
-fn manifest_that_is_a_directory_is_an_error_not_a_clean_run() {
+fn manifest_that_is_a_directory_does_not_select_cli_scope() {
     let td = tempfile::tempdir().unwrap();
     let repo = manifest_policy_fixture(td.path());
     fs::create_dir(repo.join("Cargo.toml")).expect("mkdir Cargo.toml");
@@ -2581,18 +2644,16 @@ fn manifest_that_is_a_directory_is_an_error_not_a_clean_run() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),
-        Some(5),
-        "a manifest node that is not a regular file leaves anchoring undecidable:\n{stderr}"
+        Some(3),
+        "manifest type must not select CLI scope:\n{stderr}"
     );
     assert!(
-        one_error(&stderr, "walk")
-            .text("path")
-            .contains("Cargo.toml"),
-        "expected a walk run_error naming the undecidable manifest:\n{stderr}"
+        records_named(&stderr, "run_error").is_empty(),
+        "manifest directory is an ordinary directory:\n{stderr}"
     );
     assert!(
-        rewritten_paths(&stdout).is_empty(),
-        "an undecidable manifest must not silently anchor the subtree:\n{stdout}"
+        !rewritten_paths(&stdout).is_empty(),
+        "manifest type must not hide source:\n{stdout}"
     );
 }
 #[cfg(unix)]
@@ -2622,8 +2683,8 @@ fn manifest_symlink_to_an_inaccessible_target_is_an_error_not_a_clean_run() {
         "expected a walk run_error naming the unresolvable manifest:\n{stderr}"
     );
     assert!(
-        rewritten_paths(&stdout).is_empty(),
-        "an unresolvable manifest must not silently anchor the subtree:\n{stdout}"
+        !rewritten_paths(&stdout).is_empty(),
+        "a failing nested link must not hide independent source:\n{stdout}"
     );
 }
 #[cfg(unix)]
@@ -2672,26 +2733,36 @@ fn an_unresolvable_allowlisted_child_is_an_error_not_a_clean_run() {
 }
 #[cfg(unix)]
 #[test]
-fn an_allowlisted_child_symlinked_to_a_real_directory_is_walked() {
+fn a_nested_src_symlink_is_refused_in_every_mode() {
     let td = tempfile::tempdir().unwrap();
     let repo = td.path();
     fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
-    let real = repo.join("realsrc/inner");
+    let external = tempfile::tempdir().unwrap();
+    let real = external.path().join("inner");
     fs::create_dir_all(&real).expect("mkdir realsrc/inner");
     fs::write(real.join("m.rs"), "// removable\nfn m() {}\n").expect("write fixture");
-    std::os::unix::fs::symlink("realsrc", repo.join("src")).expect("src link");
-    let out = run_dry(repo);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert_pending_changes(
-        &out,
-        "an allowlisted child resolving to a real directory is a decided walk root",
-    );
-    assert!(
-        rewritten_paths(&stdout)
-            .iter()
-            .any(|p| p.ends_with("inner/m.rs")),
-        "a symlinked source root must still be walked:\n{stdout}"
-    );
+    std::os::unix::fs::symlink(&real, repo.join("src")).expect("src link");
+    for explicit in [false, true] {
+        for args in [vec![], vec!["--rewrite", "--dry-run"], vec!["--rewrite"]] {
+            let mut command = Command::new(bin());
+            command.current_dir(repo).args(args);
+            if explicit {
+                command.arg(".");
+            }
+            let out = command.output().unwrap();
+            assert_eq!(out.status.code(), Some(5), "{out:?}");
+            assert!(
+                one_error(&String::from_utf8_lossy(&out.stderr), "walk")
+                    .text("path")
+                    .ends_with("src")
+            );
+            assert!(out.stdout.is_empty());
+            assert_eq!(
+                fs::read_to_string(real.join("m.rs")).unwrap(),
+                "// removable\nfn m() {}\n"
+            );
+        }
+    }
 }
 #[cfg(unix)]
 #[test]
@@ -2699,7 +2770,8 @@ fn a_symlinked_source_file_is_refused_not_silently_skipped() {
     let td = tempfile::tempdir().unwrap();
     let repo = td.path();
     fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
-    let store = repo.join("store");
+    let external = tempfile::tempdir().unwrap();
+    let store = external.path().join("store");
     fs::create_dir_all(&store).expect("mkdir store");
     fs::create_dir_all(repo.join("src")).expect("mkdir src");
     fs::write(store.join("real.rs"), "// removable\nfn a() {}\n").expect("write target");
@@ -3653,16 +3725,19 @@ fn doc_scan_counts_unreadable_directory_as_error_and_exits_5() {
     assert_eq!(
         out.status.code(),
         Some(5),
-        "unreadable documentation-scan directory must exit 5, not clean:\n{stderr}"
+        "unreadable directory in both scans must exit 5, not clean:\n{stderr}"
     );
+    let errors = records_named(&stderr, "run_error");
+    assert_eq!(errors.len(), 2);
     assert!(
-        one_error(&stderr, "walk").text("path").contains("locked"),
-        "expected a walk run_error naming the unreadable path:\n{stderr}"
+        errors
+            .iter()
+            .all(|e| e.text("kind") == "walk" && e.text("path").contains("locked"))
     );
     assert_eq!(
         one_record(&stderr, "strip_summary").number("errors"),
-        1,
-        "expected the run error count to include the doc-scan walk error:\n{stderr}"
+        2,
+        "both Rust and documentation walks report the inaccessible directory:\n{stderr}"
     );
 }
 #[test]

@@ -311,7 +311,7 @@ One per `--rewrite` run including `--dry-run`, on stderr, closing the run.
 One per default-mode lint run, on stderr, closing the run.
 
 ```json
-{"record":"lint_summary","v":3,"root":".","scope":"project-allowlist","max_warning_files":"1","files":12,"errors":0,"warning_files":2,"warning_files_shown":1,"warning_files_hidden":1,"findings":3,"findings_shown":2,"findings_hidden":1,"undecided":1,"undecided_shown":0,"undecided_hidden":1,"overlong_doc_findings":3,"overlong_doc_undecided":1,"over_budget":3,"configuration_dependent":0,"unreadable_doc_payload":1,"uninspected_macro_body":0}
+{"record":"lint_summary","v":3,"root":".","scope":"recursive-directory","max_warning_files":"1","files":12,"errors":0,"warning_files":2,"warning_files_shown":1,"warning_files_hidden":1,"findings":3,"findings_shown":2,"findings_hidden":1,"undecided":1,"undecided_shown":0,"undecided_hidden":1,"overlong_doc_findings":3,"overlong_doc_undecided":1,"over_budget":3,"configuration_dependent":0,"unreadable_doc_payload":1,"uninspected_macro_body":0}
 ```
 
 `undecided` counts all undecided items, including suppressed records. It is reported
@@ -319,11 +319,15 @@ separately from `findings` precisely because an item the linter could
 not decide is neither a finding nor clean.
 
 `root` preserves the supplied spelling (or `.` for omitted ROOT), JSON escaped.
-`scope` is the policy selected once for this run: `file`, `project-allowlist`,
-`recursive-directory`, or `unresolved` for a failed manifest probe. Project
-allowlist covers benches/crates/examples/src/tests/build.rs. Default cwd and
-explicit manifest roots use it; other explicit directories recurse. No upward
-discovery occurs. Rewrite uses the same selection rules, without a warning cap.
+`scope` is the policy selected once for this run. The CLI emits `file` for an
+exact regular Rust file and `recursive-directory` for every directory, including
+omitted cwd and manifest roots. Recursion includes root-level and nonstandard
+directory Rust sources, with hidden/build pruning; no upward discovery occurs.
+Manifest presence or type does not select scope. `project-allowlist` and
+`unresolved` remain valid schema values for legacy/library producers.
+Rewrite uses the same selection rules, without a warning cap. Nested
+source-hiding links, including `src` links, are traversal errors; explicit
+directory-root links retain traversal. Record versions are unchanged.
 `max_warning_files` is normalized decimal text or `unlimited`. `files` counts
 enumerated Rust paths, including read/parse failures. Warning-file and item
 totals split exactly into shown plus hidden; no per-hidden-file list is emitted.

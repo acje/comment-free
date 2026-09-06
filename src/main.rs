@@ -29,11 +29,13 @@ use std::process::ExitCode;
                   All scoped files are scanned, including hidden findings and undecided items; errors\n\
                   remain visible. Summaries contain full and shown/hidden totals. Doc-lint and\n\
                   diagnostic records are v3; rewrite_summary remains v2.\n\
-                  Scope in ALL modes: omitted ROOT uses cwd project allowlist; a supplied directory\n\
-                  with its own Cargo.toml uses that allowlist (benches, crates, examples, src, tests,\n\
-                  build.rs); other explicit directories recurse with build/hidden pruning. An exact\n\
+                   Scope in ALL modes: omitted ROOT recursively scans cwd; every supplied directory\n\
+                   recursively selects .rs files with build/hidden pruning, regardless of Cargo.toml.\n\
+                   Root-level and nonstandard-directory Rust sources are included. An exact\n\
                   regular .rs file selects only that file. No upward discovery. Leaf file symlinks\n\
-                  are rejected. Rewrite processes the entire selected scope and accepts no warning cap.\n\
+                   are rejected; nested source-hiding links are traversal errors, including src links.\n\
+                   Explicit directory-root links retain traversal. Rewrite processes the entire\n\
+                   selected scope and accepts no warning cap.\n\
                   \n\
                   Lint findings, run diagnostics and summaries are all emitted as JSON\n\
                   Lines, one record per line, for LLM-agent consumption. The authoritative\n\

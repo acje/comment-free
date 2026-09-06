@@ -41,8 +41,11 @@ arguments exit two; catastrophic or unmapped I/O errors and exact lint-counter
 overflow exit one. The CLI warning-file cap limits details, not the corpus or
 verdict: hidden undecided items still cause exit four. `run_lint` and
 `cap_verdict_matrix` preserve that distinction. CLI scope is the supplied regular
-Rust file, a project allowlist for cwd/default or manifest roots, or recursive
-Rust traversal for other explicit directories; no upward discovery occurs.
+Rust file or recursive Rust traversal for every directory, including cwd/default
+and manifest roots, with hidden/build pruning; no upward discovery occurs.
+Manifest existence does not select CLI scope. Nested source-hiding links are
+traversal errors, including `src` links; explicit directory-root links retain
+traversal. The legacy library `walk_rs_files` allowlist is unchanged.
 
 ## Consequences
 

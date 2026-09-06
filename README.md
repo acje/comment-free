@@ -11,12 +11,11 @@ reported but never rewritten. Output stays terse, structured, and informative
 for automated agents.
 
 Default mode is read-only: it reports doc comments whose prose exceeds the
-configured word budget. With no ROOT argument, or with an explicit directory
-containing `Cargo.toml`, Rust traversal uses project-allowlisted locations:
-`benches/`, `crates/`, `examples/`, `src/`, `tests/`, and a root `build.rs`.
-An explicit directory without its own manifest recursively selects `.rs` files,
-still pruning hidden directories and common build/vendor output. An invalid or
-inaccessible manifest is an error, not permission to widen scope. Code is
+configured word budget. With no ROOT argument, traversal recursively selects
+`.rs` files beneath cwd; every explicit directory uses the same recursion,
+including root-level sources and nonstandard directories such as `tools/` and
+`scripts/`. Hidden directories and common build/vendor output are pruned.
+`Cargo.toml` does not select scope; ordinary traversal errors remain errors. Code is
 excluded from the count: fenced blocks, indented code blocks, inline
 code spans, and reference definitions. Findings, run diagnostics, errors and
 summaries are all emitted as JSON Lines so agents and scripts can parse them
@@ -72,9 +71,11 @@ An explicit regular `.rs` file selects exactly that file in lint, preview, and
 write modes; sibling source and documentation files are not scanned. Explicit
 file symlinks (including broken links) are rejected with exit 2. Directory-root
 links retain directory traversal behavior; nested links that could hide source
-remain traversal errors. Omitting ROOT uses the process working directory, not
-upward project discovery. Explicit `.` is an explicit directory: without a
-manifest it recurses, unlike omitted ROOT. Ancestor manifests are not inspected.
+remain traversal errors, including a nested `src` link previously promoted to a
+walk root by the CLI allowlist. Omitting ROOT uses the process working directory,
+exactly like explicit `.`; neither discovers ancestors or consults manifests.
+This expands CLI scope in lint, preview, and write modes. The library's legacy
+`walk_rs_files` allowlist behavior is unchanged.
 
 Exit codes:
 

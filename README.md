@@ -233,10 +233,10 @@ warnings. `rustfmt` runs on **stable defaults only**; do not add a
 ### Architecture decisions
 
 `adr-fmt` supplies governance guidelines and an example template, not a
-shipped default decision corpus. Our repository-owned Draft corpus lives
+shipped default decision corpus. Our repository-owned Accepted corpus lives
 in [docs/adr/](docs/adr/), discovered through `adr-fmt.toml`. Its root,
-[CF-0001](docs/adr/cf/CF-0001-bootstrap-adr-governance.md), remains **Draft**;
-its focused child records also remain Draft. They record existing contracts,
+[CF-0001](docs/adr/cf/CF-0001-bootstrap-adr-governance.md), and its five
+focused child records are **Accepted**. They record existing contracts,
 not new policy or replacements for existing governing documentation.
 Upstream AFM decisions and the example CHE corpus are not imported.
 
@@ -260,9 +260,15 @@ pinned revision, lint findings are advisory warnings and exit 0; they do
 not fail CI. Configuration or infrastructure errors can exit 1. This is
 not a zero-warning enforcement gate: inspect the diagnostics too.
 
-`--context` emits rules only from Accepted, non-stale ADRs. This all-Draft
-corpus therefore produces introductory text but no rules, with exit 0.
-`--tree CF` lists the connected Draft corpus without a hand-maintained index.
+Validation on 2026-09-06 used installed canonical `adr-fmt` 0.3.0 at revision
+`83fc20bd2cbe0976388ae74193226750d4afc471`, not the unchanged CI pin above.
+Lint exited 0 with four L015 advisories for CF-0003 through CF-0006: their
+first reference is the root while later references include same-domain
+non-root records. Reference order and parentage are preserved; the five
+former L012 Draft-parent advisories are gone.
+`--context` emits rules only from Accepted, non-stale ADRs; this run
+exited 0 and emitted 17 tagged rules for `comment-free`. `--tree CF` exited 0
+and listed the six connected Accepted records without a hand-maintained index.
 Use [the local template](docs/adr/TEMPLATE.md) for source-backed additions.
 The `docs/adr/stale/.gitkeep`
 placeholder keeps the required retirement directory present while there

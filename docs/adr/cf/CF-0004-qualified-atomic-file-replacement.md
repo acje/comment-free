@@ -3,7 +3,7 @@
 Date: 2026-09-06
 Last-reviewed: 2026-09-06
 Tier: B
-Status: Draft
+Status: Accepted
 Crates: comment-free
 
 ## Related
@@ -17,7 +17,7 @@ The existing implementation instead replaces one pathname through a sibling
 temporary file and checks for intervening edits. Sources:
 [write guarantees and limits](../../../README.md#how---rewrite-writes-and-what-it-does-not-promise)
 and [implementation](../../../src/lib.rs) (`write_atomically`,
-`TempFileGuard`, `process_file`). This Draft retains those qualifications
+`TempFileGuard`, `process_file`). This record retains those qualifications
 rather than promising transactional concurrent editing or power-loss durability.
 
 ## Decision

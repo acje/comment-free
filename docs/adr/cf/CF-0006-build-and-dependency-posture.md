@@ -3,7 +3,7 @@
 Date: 2026-09-06
 Last-reviewed: 2026-09-06
 Tier: B
-Status: Draft
+Status: Accepted
 Crates: comment-free
 
 ## Related
@@ -19,7 +19,7 @@ Sources: [Cargo.toml](../../../Cargo.toml),
 [supply-chain configuration](../../../deny.toml),
 [operational guidance](../../../AGENTS.md#build--test--lint), and
 [CI](../../../.github/workflows/ci-reusable.yml).
-This Draft records existing build constraints without importing workspace
+This record documents existing build constraints without importing workspace
 inheritance or policies from the reference corpus.
 
 ## Decision
@@ -48,4 +48,4 @@ Canonical Git installation uses an explicit invoking toolchain and
 − becomes harder: Snapshot and toolchain upgrades require deliberate configuration changes.
 risks/migration: Locked resolution alone is not proof of byte-identical
 binaries or absence of vulnerabilities. No dependency, toolchain, lint,
-license, or CI-policy change is made by recording this Draft.
+license, or CI-policy change is made by accepting this record.

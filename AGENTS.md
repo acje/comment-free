@@ -65,8 +65,9 @@ is preserved in `main`; stop if unique final content or remote divergence appear
 
 `adr-fmt` ships guidelines and an example template, not a default decision
 corpus. This repository owns `docs/adr/`, configured by `adr-fmt.toml`.
-CF-0001 and its child records are Draft, not accepted policy; existing governing documentation
-remains authoritative. Do not import upstream AFM or example CHE decisions.
+CF-0001 through CF-0006 are Accepted retrospective records; existing governing
+documentation remains authoritative. Acceptance introduces no new policy.
+Do not import upstream AFM or example CHE decisions.
 
 Install the same canonical revision used by the dedicated ADR CI job:
 
@@ -87,13 +88,19 @@ findings are advisory warnings and exit 0; they do not fail CI. Configuration
 or infrastructure errors can exit 1. This is not a zero-warning enforcement
 gate; inspect the diagnostics as well as the exit code.
 
-The current six-record Draft corpus produces exactly five L012 advisories:
-CF-0002 through CF-0006 reference Draft parent CF-0001. These are expected;
-investigate other diagnostics rather than accepting records or suppressing
+The six-record Accepted corpus was validated on 2026-09-06 with installed
+canonical `adr-fmt` 0.3.0 at revision
+`83fc20bd2cbe0976388ae74193226750d4afc471`, distinct from the unchanged CI pin
+above. Lint exited 0 with four L015 advisories: CF-0003 through CF-0006 list
+the root first while later references include same-domain non-root records.
+The former five L012 Draft-parent advisories are gone. Reference order and
+parentage are preserved; these advisories do not authorize reparenting.
+Investigate diagnostics rather than changing lifecycle status or suppressing
 warnings merely to make lint quiet.
 
-`--context` emits rules only from Accepted, non-stale ADRs. With this
-all-Draft corpus it exits 0 with introductory text but no rules; `--tree CF`
-lists the connected Draft corpus. Use `docs/adr/TEMPLATE.md` for source-backed
+`--context` emits rules only from Accepted, non-stale ADRs. Validation with
+that installed revision exited 0 and emitted 17 tagged rules for `comment-free`;
+`--tree CF` exited 0 and listed all six Accepted records.
+Use `docs/adr/TEMPLATE.md` for source-backed
 records, not a duplicate index. Keep `docs/adr/stale/` present even without
 retired decisions; `.gitkeep` preserves the empty directory.

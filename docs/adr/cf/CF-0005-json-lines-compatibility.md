@@ -3,7 +3,7 @@
 Date: 2026-09-06
 Last-reviewed: 2026-09-06
 Tier: B
-Status: Draft
+Status: Accepted
 Crates: comment-free
 
 ## Related
@@ -15,7 +15,7 @@ References: CF-0001, CF-0003
 Paths and item labels can contain characters that forge boundaries in
 unescaped tab-separated output. JSON Lines provides structured records
 while keeping dry-run diffs readable. The authoritative schema remains
-[record-format.md](../../record-format.md), not this Draft or the help
+[record-format.md](../../record-format.md), not this record or the help
 templates. [Record emitters](../../../src/lib.rs) include
 `push_json_string`, `doc_lint_undecided_record`, and the three record-family
 version constants; [CLI output](../../../src/main.rs) supplies line endings.

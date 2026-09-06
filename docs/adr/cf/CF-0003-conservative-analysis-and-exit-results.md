@@ -3,7 +3,7 @@
 Date: 2026-09-06
 Last-reviewed: 2026-09-06
 Tier: B
-Status: Draft
+Status: Accepted
 Crates: comment-free
 
 ## Related
@@ -18,7 +18,7 @@ uninspected documentation. Sources:
 [record semantics](../../record-format.md#doc_lint_undecided),
 [exit codes](../../../README.md#usage), and
 [CLI implementation](../../../src/main.rs) (`run_lint`, `strip_verdict`).
-This Draft records the existing distinction between findings,
+This record documents the existing distinction between findings,
 indeterminates, and processing errors.
 
 ## Decision

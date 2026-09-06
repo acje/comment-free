@@ -194,13 +194,51 @@ warnings. `rustfmt` runs on **stable defaults only**; do not add a
 `rustfmt.toml` or `clippy.toml`. `rust-toolchain.toml` pins channel
 1.98.0.
 
+### Architecture decisions
+
+`adr-fmt` supplies governance guidelines and an example template, not a
+shipped default decision corpus. Our repository-owned Draft corpus lives
+in [docs/adr/](docs/adr/), discovered through `adr-fmt.toml`. Its root,
+[CF-0001](docs/adr/cf/CF-0001-bootstrap-adr-governance.md), remains **Draft**;
+its focused child records also remain Draft. They record existing contracts,
+not new policy or replacements for existing governing documentation.
+Upstream AFM decisions and the example CHE corpus are not imported.
+
+Install the canonical revision pinned in CI, with an explicit invoking
+toolchain because `cargo install --git` ignores the source toolchain pin:
+
+```sh
+cargo +1.98.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
+```
+
+From the repository root:
+
+```sh
+adr-fmt --lint
+adr-fmt --tree CF
+adr-fmt --context comment-free
+```
+
+The dedicated ADR CI job runs the same `adr-fmt --lint` command. At the
+pinned revision, lint findings are advisory warnings and exit 0; they do
+not fail CI. Configuration or infrastructure errors can exit 1. This is
+not a zero-warning enforcement gate: inspect the diagnostics too.
+
+`--context` emits rules only from Accepted, non-stale ADRs. This all-Draft
+corpus therefore produces introductory text but no rules, with exit 0.
+`--tree CF` lists the connected Draft corpus without a hand-maintained index.
+Use [the local template](docs/adr/TEMPLATE.md) for source-backed additions.
+The `docs/adr/stale/.gitkeep`
+placeholder keeps the required retirement directory present while there
+are no retired decisions.
+
 ### Cargo.lock policy
 
 `Cargo.lock` is committed deliberately. `comment-free` ships as a
 binary, and a committed lockfile is the standard Rust convention for
-binary crates: it pins exact transitive-dependency versions so two
-clones produce byte-identical binaries given the same toolchain. It is
-also what makes `cargo install --locked` reproducible.
+binary crates: it pins the exact dependency graph exercised by CI.
+`cargo install --locked` uses that graph rather than resolving fresh versions;
+locked resolution alone does not guarantee byte-identical binaries.
 
 ## History
 

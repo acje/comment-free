@@ -14,6 +14,19 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  adr-lint:
+    name: ADR lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: 1.98.0
+      - name: Install pinned adr-fmt
+        run: cargo +1.98.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
+      - name: Lint ADRs
+        run: adr-fmt --lint
+
   build-test-lint:
     name: build, test, lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

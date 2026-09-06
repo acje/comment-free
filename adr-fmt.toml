@@ -1,0 +1,13 @@
+[corpus]
+root = "docs/adr"
+
+[stale]
+directory = "stale"
+
+[[domains]]
+prefix = "CF"
+name = "Comment-Free"
+directory = "cf"
+description = "Architecture decisions and contracts for comment-free."
+crates = ["comment-free"]
+foundation = false

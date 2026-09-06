@@ -2,8 +2,9 @@
 
 This is the authoritative reference for the structured records
 `comment-free` emits. The rustdoc constants
-`comment_free::DOC_LINT_RECORD_GRAMMAR` and
-`comment_free::REWRITE_RECORD_GRAMMAR` carry one-line templates for
+`comment_free::DOC_LINT_RECORD_GRAMMAR`,
+`comment_free::REWRITE_RECORD_GRAMMAR`, and
+`comment_free::DIAGNOSTIC_RECORD_GRAMMAR` carry one-line templates for
 `--help`; this document carries the contract.
 
 ## Encoding
@@ -23,7 +24,7 @@ UTF-8 is reported lossily.
 
 ## Versions
 
-Two independent version constants, each carried as the `v` field of its
+Three independent version constants, each carried as the `v` field of its
 own record family:
 
 | Constant | Records | Current |

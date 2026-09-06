@@ -745,15 +745,19 @@ pub fn lint_summary_record(files: u32, findings: u32, undecided: u32, errors: u3
     out.push('}');
     out
 }
-/// Canonicalise rustdoc link idioms in `path`, then strip every
-/// non-doc `//` and `/* */` comment. Every other byte is preserved.
+/// Canonicalise supported rustdoc links, then strip non-doc comments from `path`.
+/// Other bytes survive except adjacent-whitespace normalization by
+/// [`strip_line_comments_with_counts`]. [`RewriteMode::DryRun`] previews without writing.
 ///
-/// The mode selects the [`FileOutcome`] variant; see its variant docs.
+/// On supported Unix platforms, writes rename a sibling temporary file over `path`.
+/// Cleanup is best-effort on errors/unwinding; aborts, signals, or removal failures
+/// can leave residue. The byte check is not locking; hard-link aliases retain old
+/// contents; the parent directory is not synced.
 ///
-/// A write lands via a sibling temporary file renamed over the
-/// destination, so a partial rewrite is never observable. The temporary
-/// file is removed on every returning error path and, best-effort,
-/// while a panic unwinds; an abort can still leave it behind.
+/// # Errors
+///
+/// Returns [`FileOutcome::Failed`] for read/parse/write errors, rejected symlink
+/// destinations, or pre-rename byte conflicts; see [`FileError`].
 #[must_use]
 pub fn process_file(path: &Path, mode: RewriteMode) -> FileOutcome {
     let original = match fs::read_to_string(path) {
@@ -788,10 +792,10 @@ pub fn process_file(path: &Path, mode: RewriteMode) -> FileOutcome {
     }
 }
 /// Strip non-doc line and block comments from `src` using
-/// [`ra_ap_rustc_lexer`], preserving every other byte verbatim. Thin
-/// wrapper over [`strip_line_comments_with_counts`] discarding the
-/// [`RewriteCounts`] tally; see that function's docs for the full
-/// stripping and blank-line-collapse algorithm.
+/// [`ra_ap_rustc_lexer`], including adjacent-whitespace trimming and
+/// blank-line scar collapsing. Delegates to [`strip_line_comments_with_counts`]
+/// and discards the [`RewriteCounts`] tally; see its stripping algorithm.
+/// Other bytes are preserved, including doc comments and string literals.
 #[must_use]
 pub fn strip_line_comments(src: &str) -> String {
     strip_line_comments_with_counts(src).0

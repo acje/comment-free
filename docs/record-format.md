@@ -29,9 +29,9 @@ own record family:
 
 | Constant | Records | Current |
 |---|---|---|
-| `DOC_LINT_RECORD_VERSION` | `doc_lint_*` | `2` |
+| `DOC_LINT_RECORD_VERSION` | `doc_lint_*` | `3` |
 | `REWRITE_RECORD_VERSION` | `rewrite_summary` | `2` |
-| `DIAGNOSTIC_RECORD_VERSION` | `run_error`, `doc_file_warning`, `rewrite_file`, `strip_summary`, `lint_summary` | `2` |
+| `DIAGNOSTIC_RECORD_VERSION` | `run_error`, `doc_file_warning`, `rewrite_file`, `strip_summary`, `lint_summary` | `3` |
 
 The run-diagnostic family was previously emitted as the unversioned
 tab-separated lines `SUMMARY`, `REWRITE`, `WOULD_REWRITE`, `DOC_WARN`,
@@ -49,12 +49,31 @@ rules below, which are designed so that most evolution needs no bump.
 
 ## Records
 
+Version 3 permits bounded detail output: `--max-warning-files` defaults to 1,
+accepts ASCII decimal digits (leading zeros allowed) or exactly `unlimited`,
+and conflicts with rewrite/its alias. Zero emits no stdout lint records.
+Every scoped file is scanned; errors always remain on stderr. A warning file
+contains findings or undecided items (or both); clean/error-only files consume
+no slots. All details from an admitted file are emitted together. Admission is
+native PathBuf order, before lossy display, so equal displayed paths need not
+identify equal files. The CLI cap never selects which files rewrite may modify.
+
+Record counts on stdout no longer equal corpus totals. Use `lint_summary` for
+full totals and exit status for the verdict. This breaks a v2 consumer's
+one-detail-per-item assumption and requires the family bump. The deprecated
+library `lint_summary_record` explicitly retains its v2 payload/version; new
+callers use `LintTotals::record`. The CLI emits only the complete v3 summary.
+The v3 public helper takes `ReportScope` and `WarningLimit`, not raw metadata
+strings. `WarningLimit` parses the same strict syntax as the CLI; its numeric
+variant formats normalized decimal. These types constrain schema values, not
+the truth of caller-supplied scope or relationships between caller-owned totals.
+
 ### `doc_lint_finding`
 
-One per finding, on stdout.
+One per admitted finding, on stdout.
 
 ```json
-{"record":"doc_lint_finding","v":2,"outcome":"finding","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":90,"budget":80,"fail_closed":false}
+{"record":"doc_lint_finding","v":3,"outcome":"finding","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":90,"budget":80,"fail_closed":false}
 ```
 
 `fail_closed` is `true` when `words` came from the fail-closed recount
@@ -66,7 +85,7 @@ not the real prose count.
 One per finding kind, naming the doctrine once, on stdout.
 
 ```json
-{"record":"doc_lint_header","v":2,"kind":"overlong_doc","doctrine":"Rust docs must contain a concise summary, ..."}
+{"record":"doc_lint_header","v":3,"kind":"overlong_doc","doctrine":"Rust docs must contain a concise summary, ..."}
 ```
 
 The doctrine string states no numeric limit on fenced examples. Nothing
@@ -75,22 +94,25 @@ does not enforce.
 
 ### `doc_lint_hint`
 
-Up to 50 per kind, on stdout, sorted by `words - budget` descending. A
-`doc_lint_truncated` record follows when the kind exceeds the cap.
+Up to 50 admitted findings, on stdout, sorted by `words - budget` descending.
+Equal overshoots retain native path order then report order. A
+`doc_lint_truncated` record follows when admitted findings exceed 50; its
+remaining count excludes hidden-file findings. No admitted findings means no
+header, hint, or truncated record.
 
 ```json
-{"record":"doc_lint_hint","v":2,"outcome":"finding","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":90,"budget":80}
+{"record":"doc_lint_hint","v":3,"outcome":"finding","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":90,"budget":80}
 ```
 
 ### `doc_lint_truncated`
 
 ```json
-{"record":"doc_lint_truncated","v":2,"kind":"overlong_doc","remaining":10}
+{"record":"doc_lint_truncated","v":3,"kind":"overlong_doc","remaining":10}
 ```
 
 ### `doc_lint_undecided`
 
-One per item whose doc set the linter could not decide, on stdout. The
+One per admitted item whose doc set the linter could not decide, on stdout. The
 evidence fields are **keyed on `outcome`**, because each cause supports
 different evidence; a consumer reads `outcome` before reading any
 numeric field.
@@ -98,7 +120,7 @@ numeric field.
 #### `outcome`: `configuration_dependent`
 
 ```json
-{"record":"doc_lint_undecided","v":2,"outcome":"configuration_dependent","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":40,"budget":80,"words_all_cfgs":95,"fail_closed":false}
+{"record":"doc_lint_undecided","v":3,"outcome":"configuration_dependent","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","words":40,"budget":80,"words_all_cfgs":95,"fail_closed":false}
 ```
 
 `cfg_attr` doc payloads — nested `cfg_attr` included — are held apart
@@ -137,7 +159,7 @@ above zero has not established that the tree is clean, and does not exit
 #### `outcome`: `unreadable_doc_payload`
 
 ```json
-{"record":"doc_lint_undecided","v":2,"outcome":"unreadable_doc_payload","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","budget":80}
+{"record":"doc_lint_undecided","v":3,"outcome":"unreadable_doc_payload","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"fn f","budget":80}
 ```
 
 The item carries a doc payload that is not a string literal — a macro
@@ -169,7 +191,7 @@ under `uninspected_macro_body` instead.
 #### `outcome`: `uninspected_macro_body`
 
 ```json
-{"record":"doc_lint_undecided","v":2,"outcome":"uninspected_macro_body","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"macro noisy","budget":80}
+{"record":"doc_lint_undecided","v":3,"outcome":"uninspected_macro_body","kind":"overlong_doc","path":"src/lib.rs","line":42,"item":"macro noisy","budget":80}
 ```
 
 A macro token body — a `macro_rules!` definition, or the tokens passed to
@@ -219,7 +241,9 @@ usable as a check. Write mode is not a check — it was asked to change
 the tree — so it exits `0` whatever `rewritten` reports. `errors` above
 zero outranks both and exits `5`: a tree that could not be fully read is
 a stronger signal than a pending change. No record grammar changes; the
-counters that drive this are the existing `v2` `strip_summary` fields.
+counters that drive this retain their meaning in `v3` `strip_summary` fields.
+Exact lint-total overflow aborts with exit 1 and no final summary; it never
+saturates or wraps into a clean verdict.
 
 ### `rewrite_summary`
 
@@ -238,7 +262,7 @@ One per failed path, on stderr. Every occurrence increments the `errors`
 counter of the run's summary record and drives exit code 5.
 
 ```json
-{"record":"run_error","v":2,"kind":"walk","path":"src/locked","message":"cannot traverse src/locked: Permission denied (os error 13)"}
+{"record":"run_error","v":3,"kind":"walk","path":"src/locked","message":"cannot traverse src/locked: Permission denied (os error 13)"}
 ```
 
 `kind` is one of:
@@ -259,7 +283,7 @@ stderr. These files are never modified; the record exists so a consumer
 can see what was deliberately skipped.
 
 ```json
-{"record":"doc_file_warning","v":2,"path":"README.md"}
+{"record":"doc_file_warning","v":3,"path":"README.md"}
 ```
 
 ### `rewrite_file`
@@ -268,7 +292,7 @@ One per changed file, on stdout. `mode` is `write` when the file was
 replaced on disk and `dry-run` when it only would have been.
 
 ```json
-{"record":"rewrite_file","v":2,"mode":"dry-run","path":"src/lib.rs"}
+{"record":"rewrite_file","v":3,"mode":"dry-run","path":"src/lib.rs"}
 ```
 
 Under `--dry-run` the unified diff for that file follows immediately on
@@ -279,7 +303,7 @@ stdout as plain text — see "The `--dry-run` diff body" below.
 One per `--rewrite` run including `--dry-run`, on stderr, closing the run.
 
 ```json
-{"record":"strip_summary","v":2,"mode":"write","rewritten":1,"unchanged":0,"errors":0}
+{"record":"strip_summary","v":3,"mode":"write","rewritten":1,"unchanged":0,"errors":0}
 ```
 
 ### `lint_summary`
@@ -287,12 +311,32 @@ One per `--rewrite` run including `--dry-run`, on stderr, closing the run.
 One per default-mode lint run, on stderr, closing the run.
 
 ```json
-{"record":"lint_summary","v":2,"files":12,"findings":3,"undecided":1,"errors":0}
+{"record":"lint_summary","v":3,"root":".","scope":"project-allowlist","max_warning_files":"1","files":12,"errors":0,"warning_files":2,"warning_files_shown":1,"warning_files_hidden":1,"findings":3,"findings_shown":2,"findings_hidden":1,"undecided":1,"undecided_shown":0,"undecided_hidden":1,"overlong_doc_findings":3,"overlong_doc_undecided":1,"over_budget":3,"configuration_dependent":0,"unreadable_doc_payload":1,"uninspected_macro_body":0}
 ```
 
-`undecided` counts `doc_lint_undecided` records. It is reported
+`undecided` counts all undecided items, including suppressed records. It is reported
 separately from `findings` precisely because an item the linter could
 not decide is neither a finding nor clean.
+
+`root` preserves the supplied spelling (or `.` for omitted ROOT), JSON escaped.
+`scope` is the policy selected once for this run: `file`, `project-allowlist`,
+`recursive-directory`, or `unresolved` for a failed manifest probe. Project
+allowlist covers benches/crates/examples/src/tests/build.rs. Default cwd and
+explicit manifest roots use it; other explicit directories recurse. No upward
+discovery occurs. Rewrite uses the same selection rules, without a warning cap.
+`max_warning_files` is normalized decimal text or `unlimited`. `files` counts
+enumerated Rust paths, including read/parse failures. Warning-file and item
+totals split exactly into shown plus hidden; no per-hidden-file list is emitted.
+`overlong_doc_findings`/`overlong_doc_undecided` are kind totals; `over_budget`
+counts outcome `finding`, with the three other outcome totals named verbatim.
+All these are exact u32 run totals. Per-item word/line counts and rewrite counts
+retain their pre-existing representation limits, outside this run-total contract.
+
+The lint implementation retains sorted paths (O(P items plus path bytes and
+capacities)), a current source/AST/report, and at most 50 owned hint candidates.
+Per-file bytes/items and path count are unbounded. Output blocks synchronously;
+there are no spawned tasks, queues, or retries. Runtime/allocator/stack/kernel
+memory and huge single-file/error output are not bounded by this contract.
 
 ## Compatibility rules for consumers
 
@@ -316,7 +360,7 @@ does not is not a conforming consumer.
    configurations only, `unreadable_doc_payload` for a doc payload that
    is not a string literal, and `uninspected_macro_body` for a doc
    attribute inside a macro token body. Further outcomes arrive as an
-   added `outcome` value, under `v=2`, and may carry a different key set
+   added `outcome` value, under `v=3`, and may carry a different key set
    from the outcomes already defined — which is why the evidence fields
    of `doc_lint_undecided` are read only after its `outcome`.
 6. **Reject duplicate keys.** A record with a repeated key is malformed;

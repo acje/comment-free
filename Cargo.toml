@@ -1,6 +1,6 @@
 [package]
 name = "comment-free"
-version = "0.1.0"
+version = "0.2.0"
 description = "Rust source comment hygiene tool: strips non-doc comments, normalises rustdoc link idioms, lints doc-comment length"
 edition = "2024"
 rust-version = "1.98"

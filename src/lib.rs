@@ -22,7 +22,7 @@ pub const DOC_LINT_DOCTRINE_MSG: &str = "Rust docs must contain a concise summar
 /// understand. See `docs/record-format.md` for the record grammar and
 /// the compatibility rules that let new fields, kinds, and outcomes
 /// arrive without a bump.
-pub const DOC_LINT_RECORD_VERSION: u32 = 2;
+pub const DOC_LINT_RECORD_VERSION: u32 = 3;
 /// One-line JSON templates for the `doc_lint_*` record family, for the
 /// binary's `--help` output.
 ///
@@ -57,7 +57,7 @@ pub const REWRITE_RECORD_GRAMMAR: &str = "\
 /// `CONFLICT_ERROR` diagnostics, which carried raw unescaped paths; they
 /// join the JSON Lines contract at the same version the other families
 /// bumped to. See `docs/record-format.md`.
-pub const DIAGNOSTIC_RECORD_VERSION: u32 = 2;
+pub const DIAGNOSTIC_RECORD_VERSION: u32 = 3;
 /// One-line JSON templates for the run-diagnostic record family, for the
 /// binary's `--help` output.
 ///
@@ -67,7 +67,7 @@ pub const DIAGNOSTIC_RECORD_GRAMMAR: &str = "\
 {\"record\":\"doc_file_warning\",\"v\":<N>,\"path\":<PATH>}
 {\"record\":\"rewrite_file\",\"v\":<N>,\"mode\":<MODE>,\"path\":<PATH>}
 {\"record\":\"strip_summary\",\"v\":<N>,\"mode\":<MODE>,\"rewritten\":<U32>,\"unchanged\":<U32>,\"errors\":<U32>}
-{\"record\":\"lint_summary\",\"v\":<N>,\"files\":<U32>,\"findings\":<U32>,\"undecided\":<U32>,\"errors\":<U32>}";
+{\"record\":\"lint_summary\",\"v\":<N>,\"root\":<PATH>,\"scope\":<SCOPE>,\"max_warning_files\":<STRING>,\"files\":<U32>,\"errors\":<U32>,\"warning_files\":<U32>,\"warning_files_shown\":<U32>,\"warning_files_hidden\":<U32>,\"findings\":<U32>,\"findings_shown\":<U32>,\"findings_hidden\":<U32>,\"undecided\":<U32>,\"undecided_shown\":<U32>,\"undecided_hidden\":<U32>,\"overlong_doc_findings\":<U32>,\"overlong_doc_undecided\":<U32>,\"over_budget\":<U32>,\"configuration_dependent\":<U32>,\"unreadable_doc_payload\":<U32>,\"uninspected_macro_body\":<U32>}";
 /// Which pass a `--rewrite` run made over the tree.
 ///
 /// The unified-diff context width is carried by [`RewriteMode::DryRun`]
@@ -203,6 +203,12 @@ pub enum CommentFreeError {
     /// ROOT path passed on the CLI is not a directory.
     #[error("ROOT is not a directory")]
     NotADirectory,
+    /// ROOT is neither a directory nor a regular, non-symlink `.rs` file.
+    #[error("ROOT must be a directory or a regular .rs file; leaf file symlinks are refused")]
+    InvalidRoot,
+    /// An exact run total exceeded the representable counter range.
+    #[error("run counter overflow; summary is incomplete")]
+    CounterOverflow,
     /// Generic IO error surfaced from [`std::io`].
     #[error("io error: {0}")]
     Io(#[from] io::Error),
@@ -261,9 +267,9 @@ impl WalkError {
 impl From<&CommentFreeError> for ExitCode {
     fn from(e: &CommentFreeError) -> Self {
         match e {
-            CommentFreeError::NotADirectory => Self::from(2),
+            CommentFreeError::NotADirectory | CommentFreeError::InvalidRoot => Self::from(2),
             CommentFreeError::DocLintFailure => Self::from(4),
-            CommentFreeError::Io(_) => Self::from(1),
+            CommentFreeError::Io(_) | CommentFreeError::CounterOverflow => Self::from(1),
         }
     }
 }
@@ -730,10 +736,15 @@ pub fn strip_summary_record(
     out.push('}');
     out
 }
-/// The `lint_summary` record closing a default-mode lint run.
+/// Legacy v2 summary, retained for callers that do not supply v3 scope and totals.
+/// New callers use [`LintTotals::record`]; this helper never emits a v3 record.
+#[deprecated(
+    since = "0.2.0",
+    note = "use LintTotals::record for the complete v3 summary"
+)]
 #[must_use]
 pub fn lint_summary_record(files: u32, findings: u32, undecided: u32, errors: u32) -> String {
-    let mut out = open_record("lint_summary", DIAGNOSTIC_RECORD_VERSION);
+    let mut out = open_record("lint_summary", 2);
     out.push(',');
     push_number(&mut out, "files", files);
     out.push(',');
@@ -745,6 +756,239 @@ pub fn lint_summary_record(files: u32, findings: u32, undecided: u32, errors: u3
     out.push('}');
     out
 }
+/// Selected traversal policy carried by a v3 lint summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportScope {
+    /// One explicitly supplied Rust file.
+    File,
+    /// Cargo source allowlist at the selected root.
+    ProjectAllowlist,
+    /// Recursive Rust traversal below an explicit directory.
+    RecursiveDirectory,
+    /// The manifest probe could not establish a traversal policy.
+    Unresolved,
+}
+impl ReportScope {
+    /// Canonical schema spelling of this policy.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::ProjectAllowlist => "project-allowlist",
+            Self::RecursiveDirectory => "recursive-directory",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
+/// Maximum warning files admitted for details; zero is summary-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningLimit {
+    /// Admit at most this many warning files.
+    Limited(usize),
+    /// Admit every warning file.
+    Unlimited,
+}
+impl std::str::FromStr for WarningLimit {
+    type Err = &'static str;
+
+    /// Parse ASCII decimal digits or exactly `unlimited`.
+    ///
+    /// # Errors
+    /// Rejects empty input, non-ASCII digits, signs, whitespace, other spellings,
+    /// and decimal values exceeding [`usize::MAX`].
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "unlimited" => Ok(Self::Unlimited),
+            digits if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => digits
+                .parse()
+                .map(Self::Limited)
+                .map_err(|_| "warning limit overflow"),
+            _ => Err("expected ASCII decimal digits or unlimited"),
+        }
+    }
+}
+impl WarningLimit {
+    /// Whether another warning file can be admitted after `shown` files.
+    #[must_use]
+    pub const fn admits(self, shown: u32) -> bool {
+        match self {
+            Self::Limited(limit) => (shown as usize) < limit,
+            Self::Unlimited => true,
+        }
+    }
+}
+impl std::fmt::Display for WarningLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Limited(limit) => write!(f, "{limit}"),
+            Self::Unlimited => f.write_str("unlimited"),
+        }
+    }
+}
+
+/// Exact corpus and admitted-detail counts for one synchronous lint run.
+#[derive(Default, Clone)]
+pub struct LintTotals {
+    files: u32,
+    errors: u32,
+    warning_files: u32,
+    warning_files_shown: u32,
+    findings: u32,
+    findings_shown: u32,
+    undecided: u32,
+    undecided_shown: u32,
+    outcomes: std::collections::BTreeMap<&'static str, u32>,
+}
+fn add_exact(counter: &mut u32, amount: usize) -> Result<(), CommentFreeError> {
+    *counter = counter
+        .checked_add(u32::try_from(amount).map_err(|_| CommentFreeError::CounterOverflow)?)
+        .ok_or(CommentFreeError::CounterOverflow)?;
+    Ok(())
+}
+impl LintTotals {
+    /// Count one enumerated source file.
+    /// # Errors
+    /// Returns [`CommentFreeError::CounterOverflow`] when the total overflows.
+    pub fn file(&mut self) -> Result<(), CommentFreeError> {
+        add_exact(&mut self.files, 1)
+    }
+    /// Count one visible processing or traversal error.
+    /// # Errors
+    /// Returns [`CommentFreeError::CounterOverflow`] when the total overflows.
+    pub fn error(&mut self) -> Result<(), CommentFreeError> {
+        add_exact(&mut self.errors, 1)
+    }
+    /// Accumulate a report, admitting all of its warnings together when selected.
+    /// # Errors
+    /// Returns [`CommentFreeError::CounterOverflow`] on any counter overflow,
+    /// leaving the accumulator unchanged.
+    pub fn observe(
+        &mut self,
+        report: &DocLintReport,
+        admitted: bool,
+    ) -> Result<(), CommentFreeError> {
+        let mut next = self.clone();
+        next.accumulate(report, admitted)?;
+        *self = next;
+        Ok(())
+    }
+    fn accumulate(
+        &mut self,
+        report: &DocLintReport,
+        admitted: bool,
+    ) -> Result<(), CommentFreeError> {
+        let findings = report.findings().len();
+        let undecided = report.undecided().len();
+        if findings != 0 || undecided != 0 {
+            add_exact(&mut self.warning_files, 1)?;
+            if admitted {
+                add_exact(&mut self.warning_files_shown, 1)?;
+            }
+        }
+        add_exact(&mut self.findings, findings)?;
+        add_exact(&mut self.undecided, undecided)?;
+        if admitted {
+            add_exact(&mut self.findings_shown, findings)?;
+            add_exact(&mut self.undecided_shown, undecided)?;
+        }
+        add_exact(self.outcomes.entry("over_budget").or_default(), findings)?;
+        for item in report.undecided() {
+            add_exact(self.outcomes.entry(item.outcome().as_str()).or_default(), 1)?;
+        }
+        Ok(())
+    }
+    /// Warning files admitted for details so far.
+    #[must_use]
+    pub const fn warning_files_shown(&self) -> u32 {
+        self.warning_files_shown
+    }
+    /// All warning files, including those hidden from details.
+    #[must_use]
+    pub const fn warning_files(&self) -> u32 {
+        self.warning_files
+    }
+    /// All observed errors.
+    #[must_use]
+    pub const fn errors(&self) -> u32 {
+        self.errors
+    }
+    /// Findings admitted for details and eligible for hints.
+    #[must_use]
+    pub const fn findings_shown(&self) -> u32 {
+        self.findings_shown
+    }
+    /// Render a v3 summary; limit is normalized decimal or `unlimited`.
+    ///
+    /// Raw strings cannot construct reporting metadata.
+    ///
+    /// ```compile_fail,E0308
+    /// use comment_free::LintTotals;
+    /// use std::path::Path;
+    /// LintTotals::default().record(Path::new("."), "bogus", "-1");
+    /// ```
+    ///
+    /// ```compile_fail,E0308
+    /// use comment_free::{LintTotals, WarningLimit};
+    /// use std::path::Path;
+    /// LintTotals::default().record(Path::new("."), "bogus", WarningLimit::Limited(0));
+    /// ```
+    ///
+    /// ```compile_fail,E0308
+    /// use comment_free::{LintTotals, ReportScope};
+    /// use std::path::Path;
+    /// LintTotals::default().record(Path::new("."), ReportScope::File, "-1");
+    /// ```
+    #[must_use]
+    pub fn record(&self, root: &Path, scope: ReportScope, limit: WarningLimit) -> String {
+        let mut out = open_record("lint_summary", DIAGNOSTIC_RECORD_VERSION);
+        for (key, value) in [
+            ("root", root.display().to_string()),
+            ("scope", scope.as_str().to_owned()),
+            ("max_warning_files", limit.to_string()),
+        ] {
+            out.push(',');
+            push_text(&mut out, key, &value);
+        }
+        for (key, value) in [
+            ("files", self.files),
+            ("errors", self.errors),
+            ("warning_files", self.warning_files),
+            ("warning_files_shown", self.warning_files_shown),
+            (
+                "warning_files_hidden",
+                self.warning_files - self.warning_files_shown,
+            ),
+            ("findings", self.findings),
+            ("findings_shown", self.findings_shown),
+            ("findings_hidden", self.findings - self.findings_shown),
+            ("undecided", self.undecided),
+            ("undecided_shown", self.undecided_shown),
+            ("undecided_hidden", self.undecided - self.undecided_shown),
+            ("overlong_doc_findings", self.findings),
+            ("overlong_doc_undecided", self.undecided),
+        ] {
+            out.push(',');
+            push_number(&mut out, key, value);
+        }
+        for name in [
+            "over_budget",
+            "configuration_dependent",
+            "unreadable_doc_payload",
+            "uninspected_macro_body",
+        ] {
+            out.push(',');
+            push_number(
+                &mut out,
+                name,
+                self.outcomes.get(name).copied().unwrap_or(0),
+            );
+        }
+        out.push('}');
+        out
+    }
+}
+
 /// Canonicalise supported rustdoc links, then strip non-doc comments from `path`.
 /// Other bytes survive except adjacent-whitespace normalization by
 /// [`strip_line_comments_with_counts`]. [`RewriteMode::DryRun`] previews without writing.
@@ -1516,23 +1760,24 @@ fn resolve_child_root_link(child: &Path, want: RootNode) -> Result<ChildRoot, Wa
 fn resolve_walk_roots(root: &Path) -> Result<Vec<PathBuf>, WalkError> {
     Ok(match classify_root(root)? {
         RootScope::SourceTree => vec![root.to_path_buf()],
-        RootScope::ProjectRoot => {
-            let mut bases = Vec::new();
-            let dirs = ALLOWED_ROOT_DIRS
-                .iter()
-                .map(|d| (root.join(d), RootNode::Dir));
-            let files = ALLOWED_ROOT_FILES
-                .iter()
-                .map(|f| (root.join(f), RootNode::File));
-            for (child, want) in dirs.chain(files) {
-                match child_source_root(&child, want)? {
-                    ChildRoot::Present => bases.push(child),
-                    ChildRoot::Absent => {}
-                }
-            }
-            bases
-        }
+        RootScope::ProjectRoot => project_walk_roots(root)?,
     })
+}
+fn project_walk_roots(root: &Path) -> Result<Vec<PathBuf>, WalkError> {
+    let mut bases = Vec::new();
+    let dirs = ALLOWED_ROOT_DIRS
+        .iter()
+        .map(|d| (root.join(d), RootNode::Dir));
+    let files = ALLOWED_ROOT_FILES
+        .iter()
+        .map(|f| (root.join(f), RootNode::File));
+    for (child, want) in dirs.chain(files) {
+        match child_source_root(&child, want)? {
+            ChildRoot::Present => bases.push(child),
+            ChildRoot::Absent => {}
+        }
+    }
+    Ok(bases)
 }
 const SYMLINK_NOT_TRAVERSED: &str =
     "symbolic link is not followed, so what it points at cannot be reported clean";
@@ -1570,7 +1815,57 @@ fn walked_link(path: &Path) -> Option<Result<PathBuf, WalkError>> {
 /// source, surfaces as a [`WalkError`], never as scope. Build output is
 /// pruned case-insensitively.
 pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
-    let (bases, undecided) = match resolve_walk_roots(root) {
+    walk_resolved_roots(resolve_walk_roots(root))
+}
+
+/// How a CLI directory root was selected; neither choice discovers ancestors.
+#[derive(Debug, Clone, Copy)]
+pub enum DirectorySelection {
+    /// Omitted ROOT: scan only project-allowlisted children of cwd.
+    DefaultCwd,
+    /// Supplied ROOT: recurse unless its own Cargo.toml selects the allowlist.
+    Explicit,
+}
+
+/// Iterate Rust sources in a CLI directory scope, preserving pruning and link policy.
+/// Invalid or inaccessible manifests and traversal failures yield [`WalkError`].
+/// A manifest at the supplied root selects project-allowlisted children even
+/// when that root is named `src`; no ancestor manifests are consulted.
+pub fn walk_cli_directory(
+    root: &Path,
+    selection: DirectorySelection,
+) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
+    plan_cli_directory(root, selection).1
+}
+
+/// Resolve a directory scan once, returning its selected policy and traversal.
+/// Policy is `project-allowlist`, `recursive-directory`, or `unresolved` when
+/// the manifest probe fails. The iterator preserves that failure as a [`WalkError`].
+pub fn plan_cli_directory(
+    root: &Path,
+    selection: DirectorySelection,
+) -> (
+    ReportScope,
+    impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_>,
+) {
+    let (policy, roots) = match (selection, manifest_anchor(root)) {
+        (_, Err(error)) => (ReportScope::Unresolved, Err(error)),
+        (DirectorySelection::DefaultCwd, Ok(_))
+        | (DirectorySelection::Explicit, Ok(ManifestAnchor::Anchored)) => {
+            (ReportScope::ProjectAllowlist, project_walk_roots(root))
+        }
+        (DirectorySelection::Explicit, Ok(ManifestAnchor::Absent)) => (
+            ReportScope::RecursiveDirectory,
+            Ok(vec![root.to_path_buf()]),
+        ),
+    };
+    (policy, walk_resolved_roots(roots))
+}
+
+fn walk_resolved_roots(
+    roots: Result<Vec<PathBuf>, WalkError>,
+) -> impl Iterator<Item = Result<PathBuf, WalkError>> {
+    let (bases, undecided) = match roots {
         Ok(bases) => (bases, None),
         Err(e) => (Vec::new(), Some(e)),
     };
@@ -4618,6 +4913,16 @@ mod walk_symlink_tests {
 }
 #[cfg(test)]
 mod record_tests {
+    #[test]
+    fn lint_counter_overflow_preserves_prior_total() {
+        let mut counter = u32::MAX;
+        assert!(matches!(
+            super::add_exact(&mut counter, 1),
+            Err(super::CommentFreeError::CounterOverflow)
+        ));
+        assert_eq!(counter, u32::MAX);
+    }
+
     use super::{
         DOC_LINT_RECORD_VERSION, DocLintKind, REWRITE_RECORD_VERSION, RewriteCounts, RewriteMode,
         doc_lint_finding_record, doc_lint_header_record, doc_lint_hint_record,
@@ -4631,7 +4936,7 @@ mod record_tests {
     fn hint_record_carries_record_name_version_and_outcome() {
         let line = hint("src/lib.rs", "fn f");
         assert!(
-            line.starts_with("{\"record\":\"doc_lint_hint\",\"v\":2,"),
+            line.starts_with("{\"record\":\"doc_lint_hint\",\"v\":3,"),
             "{line}"
         );
         assert!(line.contains("\"outcome\":\"finding\""), "{line}");
@@ -4750,8 +5055,8 @@ mod record_tests {
         assert!(line.contains("\"mode\":\"dry-run\""), "{line}");
     }
     #[test]
-    fn both_record_versions_are_two() {
-        assert_eq!(DOC_LINT_RECORD_VERSION, 2);
+    fn record_family_versions_are_independent() {
+        assert_eq!(DOC_LINT_RECORD_VERSION, 3);
         assert_eq!(REWRITE_RECORD_VERSION, 2);
     }
 }

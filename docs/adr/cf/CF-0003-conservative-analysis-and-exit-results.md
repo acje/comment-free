@@ -37,7 +37,12 @@ unresolved. An all-configurations count is an upper bound, not evidence
 that a build with that doc set exists. Conditional fences can prevent a
 finding even when unconditional text alone looks over budget. Unreadable
 payloads take precedence because they may alter fence state. Invalid CLI
-arguments exit two; catastrophic or unmapped I/O errors exit one.
+arguments exit two; catastrophic or unmapped I/O errors and exact lint-counter
+overflow exit one. The CLI warning-file cap limits details, not the corpus or
+verdict: hidden undecided items still cause exit four. `run_lint` and
+`cap_verdict_matrix` preserve that distinction. CLI scope is the supplied regular
+Rust file, a project allowlist for cwd/default or manifest roots, or recursive
+Rust traversal for other explicit directories; no upward discovery occurs.
 
 ## Consequences
 

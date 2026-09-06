@@ -37,7 +37,437 @@ fn read(dir: &Path, name: &str) -> String {
     fs::read_to_string(dir.join("src").join(name)).expect("read fixture")
 }
 
-const MAX_RECORD_VERSION: u32 = 2;
+const MAX_RECORD_VERSION: u32 = 3;
+
+#[test]
+fn public_summary_metadata_has_only_schema_values() {
+    use comment_free::{LintTotals, ReportScope, WarningLimit};
+    let totals = LintTotals::default();
+    for (scope, expected) in [
+        (ReportScope::File, "file"),
+        (ReportScope::ProjectAllowlist, "project-allowlist"),
+        (ReportScope::RecursiveDirectory, "recursive-directory"),
+        (ReportScope::Unresolved, "unresolved"),
+    ] {
+        for (limit, spelling) in [
+            (WarningLimit::Limited(0), "0"),
+            (WarningLimit::Unlimited, "unlimited"),
+        ] {
+            let record = parse_record(&totals.record(Path::new("."), scope, limit)).unwrap();
+            assert_eq!(record.text("scope"), expected);
+            assert_eq!(record.text("max_warning_files"), spelling);
+        }
+    }
+    assert_eq!(
+        "000".parse::<WarningLimit>().unwrap(),
+        WarningLimit::Limited(0)
+    );
+    assert_eq!(
+        "unlimited".parse::<WarningLimit>().unwrap(),
+        WarningLimit::Unlimited
+    );
+    assert_eq!(
+        WarningLimit::Limited(usize::MAX).to_string(),
+        usize::MAX.to_string()
+    );
+    for invalid in [
+        "-1",
+        "+1",
+        "",
+        "bogus",
+        " 0",
+        "0 ",
+        "١",
+        "Unlimited",
+        "1.0",
+        "99999999999999999999999999999",
+    ] {
+        assert!(invalid.parse::<WarningLimit>().is_err(), "{invalid}");
+    }
+}
+
+#[test]
+fn cap_verdict_matrix() {
+    let td = tempfile::tempdir().unwrap();
+    let file = td.path().join("input.rs");
+    for (source, expected) in [
+        ("fn clean() {}", 0),
+        ("#[doc = include_str!(\"missing\")] pub fn item() {}", 4),
+        ("fn invalid( {", 5),
+    ] {
+        fs::write(&file, source).unwrap();
+        for cap in ["0", "1", "2", "unlimited"] {
+            let out = Command::new(bin())
+                .args(["--max-warning-files", cap])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert_eq!(out.status.code(), Some(expected), "{cap}: {out:?}");
+            if cap == "0" || expected != 4 {
+                assert!(out.stdout.is_empty());
+            }
+            let summary = one_record(&String::from_utf8_lossy(&out.stderr), "lint_summary");
+            assert_eq!(summary.text("scope"), "file");
+            assert_eq!(summary.number("undecided"), u32::from(expected == 4));
+            assert_eq!(summary.number("errors"), u32::from(expected == 5));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn capped_io_failures_remain_visible() {
+    let td = tempfile::tempdir().unwrap();
+    let file = td.path().join("input.rs");
+    fs::write(&file, "fn clean() {}").unwrap();
+    make_unreadable(&file);
+    let mut outputs = Vec::new();
+    for cap in ["0", "1", "unlimited"] {
+        outputs.push(
+            Command::new(bin())
+                .args(["--max-warning-files", cap])
+                .arg(&file)
+                .output()
+                .unwrap(),
+        );
+    }
+    make_readable(&file);
+    for out in outputs {
+        assert_eq!(out.status.code(), Some(5), "{out:?}");
+        assert!(out.stdout.is_empty());
+        assert_eq!(
+            one_error(&String::from_utf8_lossy(&out.stderr), "io").text("path"),
+            file.to_string_lossy()
+        );
+    }
+}
+
+#[test]
+fn project_order_cap_two_and_stable_hint_ties() {
+    let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::create_dir_all(td.path().join("src/nested")).unwrap();
+    let mut many = String::new();
+    for i in 0..60 {
+        writeln!(
+            many,
+            "/// one two three four five six\npub fn item{i}() {{}}"
+        )
+        .unwrap();
+    }
+    for name in ["src/z.rs", "src/nested/a.rs", "build.rs"] {
+        fs::write(td.path().join(name), &many).unwrap();
+    }
+    let out = Command::new(bin())
+        .args(["--doc-max-words", "5", "--max-warning-files", "2"])
+        .arg(td.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let findings = records_named(&stdout, "doc_lint_finding");
+    assert_eq!(findings.len(), 120);
+    assert!(findings[0].text("path").ends_with("build.rs"));
+    assert!(findings[60].text("path").ends_with("src/nested/a.rs"));
+    let hints = records_named(&stdout, "doc_lint_hint");
+    assert_eq!(hints.len(), 50);
+    for (i, hint) in hints.iter().enumerate() {
+        assert!(hint.text("path").ends_with("build.rs"));
+        assert_eq!(hint.text("item"), format!("fn item{i}"));
+        assert_eq!(hint.number("line"), u32::try_from(i * 2 + 2).unwrap());
+        assert_eq!(hint.text("kind"), "overlong_doc");
+    }
+    assert_eq!(
+        one_record(&stdout, "doc_lint_truncated").number("remaining"),
+        70
+    );
+    let summary = one_record(&String::from_utf8_lossy(&out.stderr), "lint_summary");
+    assert_eq!(summary.number("findings"), 180);
+    assert_eq!(summary.number("findings_hidden"), 60);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn native_order_is_not_lossy_display_order() {
+    use std::os::unix::ffi::OsStringExt;
+    let td = tempfile::tempdir().unwrap();
+    for (byte, item) in [(0xff, "later"), (0xfe, "first")] {
+        let name = std::ffi::OsString::from_vec(vec![byte, b'.', b'r', b's']);
+        fs::write(
+            td.path().join(name),
+            format!("/// one two three four five six\npub fn {item}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    let out = run_lint_budget(td.path(), 5);
+    assert_eq!(out.status.code(), Some(4));
+    let finding = one_record(&String::from_utf8_lossy(&out.stdout), "doc_lint_finding");
+    assert_eq!(finding.text("item"), "fn first");
+}
+
+#[test]
+#[allow(deprecated)]
+fn legacy_summary_helper_keeps_its_legacy_version() {
+    let record = parse_record(&comment_free::lint_summary_record(1, 0, 0, 0)).unwrap();
+    assert_eq!(record.number("v"), 2);
+}
+
+#[test]
+fn summary_names_the_selected_policy_not_just_the_argument_form() {
+    let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+    let out = run_lint_budget(td.path(), 5);
+    let summary = one_record(&String::from_utf8_lossy(&out.stderr), "lint_summary");
+    assert_eq!(summary.text("scope"), "project-allowlist");
+}
+
+#[test]
+fn warning_file_cap_preserves_full_verdict_and_counts() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a_clean.rs", "fn clean() {}\n");
+    write(td.path(), "b_error.rs", "fn broken( {\n");
+    write(
+        td.path(),
+        "c_unknown.rs",
+        "#[doc = include_str!(\"missing\")] pub fn c() {}\n",
+    );
+    write(
+        td.path(),
+        "d_warning.rs",
+        "/// one two three four five six\npub fn d() {}\n",
+    );
+    for (cap, shown) in [("0", 0), ("1", 1), ("unlimited", 2)] {
+        let out = Command::new(bin())
+            .args(["--doc-max-words", "5", "--max-warning-files", cap])
+            .arg(td.path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(5), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let summary = one_record(&stderr, "lint_summary");
+        assert_eq!(summary.number("files"), 4);
+        assert_eq!(summary.number("findings"), 1);
+        assert_eq!(summary.number("undecided"), 1);
+        assert_eq!(summary.number("warning_files"), 2);
+        assert_eq!(summary.number("warning_files_shown"), shown);
+        assert_eq!(summary.number("warning_files_hidden"), 2 - shown);
+        assert_eq!(records_named(&stderr, "run_error").len(), 1);
+        if shown == 0 {
+            assert!(stdout.is_empty());
+        }
+        if shown == 1 {
+            assert_eq!(records_named(&stdout, "doc_lint_undecided").len(), 1);
+            assert!(records_named(&stdout, "doc_lint_finding").is_empty());
+            assert!(records_named(&stdout, "doc_lint_hint").is_empty());
+        }
+    }
+}
+
+#[test]
+fn warning_cap_rejects_invalid_values_and_rewrite_conflicts() {
+    let td = tempfile::tempdir().unwrap();
+    for value in [
+        "",
+        "+1",
+        "-1",
+        "1.0",
+        " 1",
+        "1 ",
+        "Unlimited",
+        "١",
+        "999999999999999999999999",
+    ] {
+        let out = Command::new(bin())
+            .args(["--max-warning-files", value])
+            .arg(td.path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{value}: {out:?}");
+    }
+    for mode in ["--rewrite", "--rustdoc-link-idioms"] {
+        let out = Command::new(bin())
+            .args([mode, "--max-warning-files", "1"])
+            .arg(td.path())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+    }
+}
+
+#[test]
+fn default_cap_admits_a_whole_mixed_file_in_native_path_order() {
+    let td = tempfile::tempdir().unwrap();
+    let prose = "/// one two three four five six\npub fn item() {}\n";
+    write(td.path(), "z.rs", prose);
+    write(
+        td.path(),
+        "a.rs",
+        &format!("{prose}#[doc = include_str!(\"missing\")] pub fn unknown() {{}}\n"),
+    );
+    let out = run_lint_budget(td.path(), 5);
+    assert_eq!(out.status.code(), Some(4));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        one_record(&stdout, "doc_lint_finding")
+            .text("path")
+            .ends_with("a.rs")
+    );
+    assert_eq!(records_named(&stdout, "doc_lint_undecided").len(), 1);
+    assert_eq!(records_named(&stdout, "doc_lint_hint").len(), 1);
+    let summary = one_record(&String::from_utf8_lossy(&out.stderr), "lint_summary");
+    assert_eq!(summary.number("findings_hidden"), 1);
+    assert_eq!(summary.text("max_warning_files"), "1");
+}
+
+#[test]
+fn explicit_rust_file_is_the_entire_scope_in_every_mode() {
+    let td = tempfile::tempdir().unwrap();
+    let selected = td.path().join("selected.rs");
+    let sibling = td.path().join("sibling.rs");
+    let original = "// removable\n/// one two three four five six\npub fn selected() {}\n";
+    fs::write(&selected, original).unwrap();
+    fs::write(&sibling, original).unwrap();
+    fs::write(td.path().join("README.md"), "untouched").unwrap();
+    for (args, expected) in [
+        (vec!["--doc-max-words", "5"], 4),
+        (vec!["--rewrite", "--dry-run"], 3),
+        (vec!["--rewrite"], 0),
+    ] {
+        let out = Command::new(bin())
+            .args(args)
+            .arg(&selected)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(expected), "{out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("doc_file_warning"), "{stderr}");
+        assert_eq!(fs::read_to_string(&sibling).unwrap(), original);
+        if expected != 0 {
+            assert_eq!(fs::read_to_string(&selected).unwrap(), original);
+        }
+    }
+    assert_eq!(
+        fs::read_to_string(selected).unwrap(),
+        original.replace("// removable\n", "")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_leaf_symlinks_are_usage_errors_in_every_mode() {
+    let td = tempfile::tempdir().unwrap();
+    let target = td.path().join("target.rs");
+    let link = td.path().join("linked.rs");
+    for content in ["fn clean() {}\n", "// removable\nfn dirty() {}\n"] {
+        fs::write(&target, content).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        for args in [vec![], vec!["--rewrite", "--dry-run"], vec!["--rewrite"]] {
+            let out = Command::new(bin()).args(args).arg(&link).output().unwrap();
+            assert_eq!(out.status.code(), Some(2), "{out:?}");
+            assert!(out.stdout.is_empty());
+            assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+            assert_eq!(fs::read_to_string(&target).unwrap(), content);
+        }
+        fs::remove_file(&link).unwrap();
+    }
+    std::os::unix::fs::symlink(td.path().join("missing.rs"), &link).unwrap();
+    for args in [vec![], vec!["--rewrite", "--dry-run"], vec!["--rewrite"]] {
+        let out = Command::new(bin()).args(args).arg(&link).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+    }
+}
+
+#[test]
+fn explicit_non_rust_and_missing_files_are_usage_errors() {
+    let td = tempfile::tempdir().unwrap();
+    for name in ["input.txt", "input.RS", "missing.rs"] {
+        let path = td.path().join(name);
+        if name != "missing.rs" {
+            fs::write(&path, "fn untouched() {}\n").unwrap();
+        }
+        for args in [vec![], vec!["--rewrite", "--dry-run"], vec!["--rewrite"]] {
+            let out = Command::new(bin()).args(args).arg(&path).output().unwrap();
+            assert_eq!(out.status.code(), Some(2), "{out:?}");
+            assert!(out.stdout.is_empty());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_source_directory_link_retains_traversal() {
+    let td = tempfile::tempdir().unwrap();
+    let real = td.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("lib.rs"), "// removable\nfn item() {}\n").unwrap();
+    let link = td.path().join("src");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let out = run_dry(&link);
+    assert_pending_changes(&out, "explicit directory-root links retain traversal");
+    assert_eq!(
+        fs::read_to_string(real.join("lib.rs")).unwrap(),
+        "// removable\nfn item() {}\n"
+    );
+}
+
+#[test]
+fn explicit_arbitrary_directory_recurses_but_default_cwd_uses_allowlist() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("custom");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    fs::write(root.join("nested/item.rs"), "// removable\nfn item() {}\n").unwrap();
+    let explicit = run_dry(&root);
+    assert_pending_changes(&explicit, "explicit arbitrary directory must recurse");
+    let default = Command::new(bin())
+        .args(["--rewrite", "--dry-run"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert_eq!(default.status.code(), Some(0), "{default:?}");
+    assert_eq!(
+        one_record(&String::from_utf8_lossy(&default.stderr), "strip_summary").number("rewritten"),
+        0
+    );
+    fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    assert_eq!(run_dry(&root).status.code(), Some(0));
+}
+
+#[test]
+fn explicit_manifest_root_named_src_still_uses_project_allowlist() {
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("src");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    fs::write(root.join("stray.rs"), "// removable\nfn stray() {}\n").unwrap();
+    fs::write(root.join("src/lib.rs"), "// removable\nfn item() {}\n").unwrap();
+    let out = run_dry(&root);
+    assert_pending_changes(&out, "manifest root must scan src/lib.rs");
+    assert_eq!(
+        rewritten_paths(&String::from_utf8_lossy(&out.stdout)).len(),
+        1
+    );
+}
+
+#[test]
+fn arbitrary_directory_scope_is_shared_by_lint_and_write_without_ancestor_discovery() {
+    let td = tempfile::tempdir().unwrap();
+    fs::create_dir(td.path().join("Cargo.toml")).unwrap();
+    let root = td.path().join("custom");
+    fs::create_dir_all(root.join("nested")).unwrap();
+    let selected = root.join("nested/item.rs");
+    let original = "// removable\n/// one two three four five six\npub fn item() {}\n";
+    fs::write(&selected, original).unwrap();
+    let lint = run_lint_budget(&root, 5);
+    assert_eq!(lint.status.code(), Some(4), "{lint:?}");
+    assert_eq!(fs::read_to_string(&selected).unwrap(), original);
+    let rewritten = run(&root);
+    assert_eq!(rewritten.status.code(), Some(0), "{rewritten:?}");
+    assert_eq!(
+        fs::read_to_string(selected).unwrap(),
+        original.replace("// removable\n", "")
+    );
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum Field {
@@ -144,7 +574,30 @@ fn schema(record: &str, outcome: Option<&str>) -> Option<&'static [&'static str]
         "doc_file_warning" => Some(&["record", "v", "path"]),
         "rewrite_file" => Some(&["record", "v", "mode", "path"]),
         "strip_summary" => Some(&["record", "v", "mode", "rewritten", "unchanged", "errors"]),
-        "lint_summary" => Some(&["record", "v", "files", "findings", "undecided", "errors"]),
+        "lint_summary" => Some(&[
+            "record",
+            "v",
+            "files",
+            "findings",
+            "undecided",
+            "errors",
+            "root",
+            "scope",
+            "max_warning_files",
+            "warning_files",
+            "warning_files_shown",
+            "warning_files_hidden",
+            "findings_shown",
+            "findings_hidden",
+            "undecided_shown",
+            "undecided_hidden",
+            "overlong_doc_findings",
+            "overlong_doc_undecided",
+            "over_budget",
+            "configuration_dependent",
+            "unreadable_doc_payload",
+            "uninspected_macro_body",
+        ]),
         _ => None,
     }
 }
@@ -1050,7 +1503,7 @@ fn mutually_exclusive_cfg_docs_are_undecided_not_a_finding() {
     let undecided = one_record(&stdout, "doc_lint_undecided");
     assert_eq!(undecided.text("outcome"), "configuration_dependent");
     assert_eq!(undecided.text("kind"), "overlong_doc");
-    assert_eq!(undecided.number("v"), 2, "record version drift");
+    assert_eq!(undecided.number("v"), 3, "record version drift");
     assert_eq!(
         undecided.number("words"),
         0,
@@ -1114,7 +1567,7 @@ fn a_raw_spelled_doc_payload_is_not_reported_clean() {
     );
     let undecided = one_record(&stdout, "doc_lint_undecided");
     assert_eq!(undecided.text("outcome"), "unreadable_doc_payload");
-    assert_eq!(undecided.number("v"), 2, "record version drift");
+    assert_eq!(undecided.number("v"), 3, "record version drift");
     let summary = one_record(&stderr, "lint_summary");
     assert_eq!(summary.number("undecided"), 1);
     assert_eq!(summary.number("findings"), 0);
@@ -1139,7 +1592,7 @@ fn a_raw_spelled_doc_inside_a_macro_body_is_not_reported_clean() {
     );
     let undecided = one_record(&stdout, "doc_lint_undecided");
     assert_eq!(undecided.text("outcome"), "uninspected_macro_body");
-    assert_eq!(undecided.number("v"), 2, "record version drift");
+    assert_eq!(undecided.number("v"), 3, "record version drift");
     let summary = one_record(&stderr, "lint_summary");
     assert_eq!(summary.number("undecided"), 1);
     assert_eq!(summary.number("errors"), 0);
@@ -1369,7 +1822,7 @@ fn lint_over_budget_emits_header_once_then_hint() {
     assert_eq!(hint.text("item"), "fn f");
     assert_eq!(hint.text("kind"), "overlong_doc");
     assert_eq!(hint.text("outcome"), "finding");
-    assert_eq!(hint.number("v"), 2, "hint must carry record-version v=2");
+    assert_eq!(hint.number("v"), 3, "hint must carry record-version v=3");
     assert!(
         records_named(&stdout, "doc_lint_truncated").is_empty(),
         "no truncation expected for single finding:\n{stdout}"
@@ -1545,7 +1998,7 @@ fn lint_hint_record_is_a_json_object_with_named_fields() {
     assert_eq!(hint.number("budget"), 5);
     assert_eq!(hint.text("kind"), "overlong_doc");
     assert_eq!(hint.text("outcome"), "finding");
-    assert_eq!(hint.number("v"), 2);
+    assert_eq!(hint.number("v"), 3);
 }
 
 #[test]
@@ -1683,6 +2136,7 @@ fn lint_custom_budget_honoured() {
 fn dry_run_processes_crates_and_src_but_skips_target_and_docs() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
+    fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(root.join("src/lib.rs"), "// removable\nfn s() {}\n").expect("write src");
     fs::create_dir_all(root.join("crates/foo/src")).expect("mkdir crates/foo/src");
@@ -1724,6 +2178,7 @@ fn dry_run_processes_crates_and_src_but_skips_target_and_docs() {
 fn lint_processes_crates_and_src_but_skips_target_and_docs() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
+    fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
     fs::create_dir_all(root.join("src")).expect("mkdir src");
     fs::write(
         root.join("src/lib.rs"),
@@ -1788,6 +2243,7 @@ fn non_rust_files_under_allowed_roots_are_ignored() {
 fn root_without_crates_or_src_processes_nothing() {
     let td = tempfile::tempdir().unwrap();
     let root = td.path();
+    fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
     fs::create_dir_all(root.join("docs")).expect("mkdir docs");
     fs::write(root.join("docs/example.rs"), "// removable\nfn d() {}\n").expect("write docs");
     fs::write(root.join("stray.rs"), "// removable\nfn x() {}\n").expect("write stray");
@@ -2046,7 +2502,7 @@ fn supplied_subtree_below_src_is_processed_while_ambient_ancestry_is_not() {
     let ambient = Command::new(bin())
         .arg("--rewrite")
         .arg("--dry-run")
-        .arg(&checkout)
+        .current_dir(&checkout)
         .output()
         .expect("failed to spawn comment-free");
     let ambient_out = String::from_utf8_lossy(&ambient.stdout);
@@ -2063,6 +2519,7 @@ fn ancestor_named_src_does_not_widen_the_supplied_root() {
     let td = tempfile::tempdir().unwrap();
     let scoped = td.path().join("src/checkout");
     fs::create_dir_all(scoped.join("src")).expect("mkdir src/checkout/src");
+    fs::write(scoped.join("Cargo.toml"), "[workspace]\n").unwrap();
     fs::write(scoped.join("src/lib.rs"), "// removable\nfn c() {}\n").expect("write lib");
     fs::write(scoped.join("stray.rs"), "// removable\nfn s() {}\n").expect("write stray");
     let out = Command::new(bin())
@@ -2093,7 +2550,7 @@ fn manifest_policy_fixture(td: &Path) -> std::path::PathBuf {
     repo
 }
 #[test]
-fn absent_manifest_leaves_a_supplied_subtree_unanchored_and_clean() {
+fn absent_manifest_does_not_hide_an_explicit_subtree() {
     let td = tempfile::tempdir().unwrap();
     let repo = manifest_policy_fixture(td.path());
     let out = run_dry(&repo.join("src/module"));
@@ -2101,12 +2558,12 @@ fn absent_manifest_leaves_a_supplied_subtree_unanchored_and_clean() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),
-        Some(0),
-        "an absent manifest is a decided non-anchor, not an indeterminate:\n{stderr}"
+        Some(3),
+        "an explicit subtree needs no ancestor manifest:\n{stderr}"
     );
     assert!(
-        rewritten_paths(&stdout).is_empty(),
-        "an unanchored subtree must not be walked directly:\n{stdout}"
+        !rewritten_paths(&stdout).is_empty(),
+        "an explicit subtree must be walked directly:\n{stdout}"
     );
     assert_eq!(
         one_record(&stderr, "strip_summary").number("errors"),
@@ -2119,7 +2576,7 @@ fn manifest_that_is_a_directory_is_an_error_not_a_clean_run() {
     let td = tempfile::tempdir().unwrap();
     let repo = manifest_policy_fixture(td.path());
     fs::create_dir(repo.join("Cargo.toml")).expect("mkdir Cargo.toml");
-    let out = run_dry(&repo.join("src/module"));
+    let out = run_dry(&repo);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
@@ -2143,13 +2600,13 @@ fn manifest_that_is_a_directory_is_an_error_not_a_clean_run() {
 fn manifest_symlink_to_an_inaccessible_target_is_an_error_not_a_clean_run() {
     let td = tempfile::tempdir().unwrap();
     let repo = manifest_policy_fixture(td.path());
-    let vault = repo.join("vault");
+    let vault = td.path().join("vault");
     fs::create_dir(&vault).expect("mkdir vault");
     fs::write(vault.join("Cargo.toml"), "[package]\nname = \"p\"\n").expect("write manifest");
     std::os::unix::fs::symlink(vault.join("Cargo.toml"), repo.join("Cargo.toml"))
         .expect("symlink manifest");
     make_unreadable(&vault);
-    let out = run_dry(&repo.join("src/module"));
+    let out = run_dry(&repo);
     make_readable(&vault);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -2218,6 +2675,7 @@ fn an_unresolvable_allowlisted_child_is_an_error_not_a_clean_run() {
 fn an_allowlisted_child_symlinked_to_a_real_directory_is_walked() {
     let td = tempfile::tempdir().unwrap();
     let repo = td.path();
+    fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
     let real = repo.join("realsrc/inner");
     fs::create_dir_all(&real).expect("mkdir realsrc/inner");
     fs::write(real.join("m.rs"), "// removable\nfn m() {}\n").expect("write fixture");
@@ -2240,6 +2698,7 @@ fn an_allowlisted_child_symlinked_to_a_real_directory_is_walked() {
 fn a_symlinked_source_file_is_refused_not_silently_skipped() {
     let td = tempfile::tempdir().unwrap();
     let repo = td.path();
+    fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
     let store = repo.join("store");
     fs::create_dir_all(&store).expect("mkdir store");
     fs::create_dir_all(repo.join("src")).expect("mkdir src");
@@ -2925,7 +3384,7 @@ fn doc_lint_hint_round_trip_parses_to_struct() {
         assert_eq!(hint.number("words"), 90, "expected 90 words per finding");
         assert_eq!(hint.number("budget"), 80, "expected default budget 80");
         assert_eq!(hint.text("kind"), "overlong_doc");
-        assert_eq!(hint.number("v"), 2, "record version drift");
+        assert_eq!(hint.number("v"), 3, "record version drift");
     }
 }
 
@@ -2954,11 +3413,11 @@ fn doc_lint_record_grammar_const_is_published() {
 }
 
 #[test]
-fn doc_lint_record_version_is_two() {
+fn doc_lint_record_version_is_three() {
     assert_eq!(
         comment_free::DOC_LINT_RECORD_VERSION,
-        2,
-        "v=2 is the escaped JSON Lines record format"
+        3,
+        "v=3 permits bounded warning details"
     );
 }
 
@@ -2987,7 +3446,7 @@ fn doc_lint_truncated_record_round_trip_parses() {
         truncated.number("remaining"),
         u32::try_from(n_items - 50).unwrap()
     );
-    assert_eq!(truncated.number("v"), 2);
+    assert_eq!(truncated.number("v"), 3);
 }
 
 #[test]
@@ -3002,7 +3461,7 @@ fn doc_lint_header_record_round_trip_parses() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let header = one_record(&stdout, "doc_lint_header");
     assert_eq!(header.text("kind"), "overlong_doc");
-    assert_eq!(header.number("v"), 2);
+    assert_eq!(header.number("v"), 3);
     assert!(
         header
             .text("doctrine")
@@ -3178,6 +3637,7 @@ fn lint_mode_counts_unreadable_directory_as_error_and_exits_5() {
 #[test]
 fn doc_scan_counts_unreadable_directory_as_error_and_exits_5() {
     let td = tempfile::tempdir().unwrap();
+    fs::write(td.path().join("Cargo.toml"), "[workspace]\n").unwrap();
     write(td.path(), "a.rs", "fn f() {}\n");
     let locked = td.path().join("locked");
     fs::create_dir_all(&locked).expect("mkdir locked");
@@ -3323,8 +3783,8 @@ fn parser_accepts_the_escapes_the_emitter_produces() {
 }
 
 #[test]
-fn diagnostic_record_version_constant_is_two() {
-    assert_eq!(comment_free::DIAGNOSTIC_RECORD_VERSION, 2);
+fn diagnostic_record_version_constant_is_three() {
+    assert_eq!(comment_free::DIAGNOSTIC_RECORD_VERSION, 3);
 }
 
 #[test]
@@ -3807,7 +4267,7 @@ fn an_unreadable_doc_payload_alone_does_not_exit_zero() {
     let undecided = one_record(&stdout, "doc_lint_undecided");
     assert_eq!(undecided.text("outcome"), "unreadable_doc_payload");
     assert_eq!(undecided.text("kind"), "overlong_doc");
-    assert_eq!(undecided.number("v"), 2, "record version drift");
+    assert_eq!(undecided.number("v"), 3, "record version drift");
     assert_eq!(undecided.text("item"), "fn f");
     assert_eq!(undecided.number("budget"), 80);
     assert_eq!(

@@ -33,7 +33,13 @@ R3 [5]: Ignore unknown object keys when consuming records, but reject keys outsi
 
 R4 [6]: Keep dry-run diff bodies human-facing rather than machine-parsed; use the documented opening-brace line filter to separate records from prefixed diff lines and non-record diagnostics.
 
-All three families currently carry version two. The specification's seven
+Doc-lint and diagnostic families carry version three; rewrite-summary remains
+version two. Bounded detail emission breaks the old one-record-per-corpus-item
+assumption, so consumers use full and shown/hidden summary totals. The deprecated
+`lint_summary_record` remains explicitly v2; `LintTotals::record` is the v3 API.
+These source-backed behaviors are covered by `legacy_summary_helper_keeps_its_legacy_version`
+and `warning_file_cap_preserves_full_verdict_and_counts` in the linked tests.
+The specification's seven
 compatibility rules and outcome-specific evidence fields remain the
 contract. Paths use `Path::display`, so non-UTF-8 paths are lossy; JSON
 escaping does not create byte-exact filesystem path identity.
@@ -42,7 +48,7 @@ escaping does not create byte-exact filesystem path identity.
 
 + becomes easier: Unusual UTF-8 paths round-trip without forging record boundaries.
 − becomes harder: Consumers must preserve uncertainty when extensions are not understood.
-risks/migration: This record adds no schema fields or compatibility rules.
+risks/migration: Consumers must understand v3 before reading bounded CLI output.
 Existing [tests](../../../tests/end_to_end.rs) cover
 `record_survives_a_path_containing_a_tab_and_a_newline`,
 `every_emitted_record_line_parses_strictly`,

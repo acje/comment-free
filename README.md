@@ -10,10 +10,13 @@ links, and linted when they grow too long. Repository documentation files are
 reported but never rewritten. Output stays terse, structured, and informative
 for automated agents.
 
-Default mode is read-only: it walks Rust source files under the locations
-cargo compiles as crate source — `benches/`, `crates/`, `examples/`, `src/`,
-`tests/`, and a root `build.rs` —
-and reports doc comments whose prose exceeds the configured word budget. Code is
+Default mode is read-only: it reports doc comments whose prose exceeds the
+configured word budget. With no ROOT argument, or with an explicit directory
+containing `Cargo.toml`, Rust traversal uses project-allowlisted locations:
+`benches/`, `crates/`, `examples/`, `src/`, `tests/`, and a root `build.rs`.
+An explicit directory without its own manifest recursively selects `.rs` files,
+still pruning hidden directories and common build/vendor output. An invalid or
+inaccessible manifest is an error, not permission to widen scope. Code is
 excluded from the count: fenced blocks, indented code blocks, inline
 code spans, and reference definitions. Findings, run diagnostics, errors and
 summaries are all emitted as JSON Lines so agents and scripts can parse them
@@ -65,6 +68,14 @@ comment-free --rewrite src
 
 From a checkout, `cargo run -- <args>` is equivalent.
 
+An explicit regular `.rs` file selects exactly that file in lint, preview, and
+write modes; sibling source and documentation files are not scanned. Explicit
+file symlinks (including broken links) are rejected with exit 2. Directory-root
+links retain directory traversal behavior; nested links that could hide source
+remain traversal errors. Omitting ROOT uses the process working directory, not
+upward project discovery. Explicit `.` is an explicit directory: without a
+manifest it recurses, unlike omitted ROOT. Ancestor manifests are not inspected.
+
 Exit codes:
 
 - `0`: clean — every doc payload under ROOT was read, and every one of them
@@ -89,6 +100,30 @@ Exit `4` covers findings and indeterminates alike, because exit `0` means
 be clean. The two are still distinguishable: read `findings` and
 `undecided` in the `lint_summary` record, and the `outcome` field of each
 `doc_lint_*` record.
+
+### Bounded warning details
+
+`--max-warning-files N|unlimited` defaults to **1** warning file. `0` emits
+no stdout lint records; `unlimited` emits details for all warning files.
+Only ASCII decimal digits (including leading zeros) or exactly `unlimited`
+are accepted. The option conflicts with rewrite and its deprecated alias.
+All scoped files are still scanned: clean/error-only files consume no slots,
+and a selected file admits findings and undecided items together. Errors
+remain visible regardless of the cap. Exit 0/4/5 uses full totals, never the
+visible subset. No documentation is deleted.
+
+Admission follows native `PathBuf` order, not lossy displayed-path order.
+Hints come only from admitted findings, at most 50, highest overshoot first;
+equal overshoots retain path then report order. Summary fields distinguish
+total/shown/hidden warning files, findings and undecided items, and report
+the resolved scope policy. Package 0.2.0 emits doc-lint and diagnostic v3;
+`rewrite_summary` stays v2. See the record specification for migration.
+
+The synchronous lint path retains sorted paths (items plus path bytes and
+capacities), one current source/AST/report, and at most 50 owned hint
+candidates. Per-file size and total path count are not bounded. Blocking
+stdout has no task queue; no process-memory or zero-allocation guarantee is
+made. Lint-total overflow aborts with exit 1 before a misleading summary.
 
 ### Known limitation: doc payloads this tool cannot read
 

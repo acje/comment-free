@@ -77,7 +77,7 @@ exactly like explicit `.`; neither discovers ancestors or consults manifests.
 This expands CLI scope in lint, preview, and write modes. The library's legacy
 `walk_rs_files` allowlist behavior is unchanged.
 
-Exit codes:
+Legacy lint/rewrite exit codes (the opt-in policy gate below has separate exits):
 
 - `0`: clean — every doc payload under ROOT was read, and every one of them
   was decided against the budget
@@ -101,6 +101,49 @@ Exit `4` covers findings and indeterminates alike, because exit `0` means
 be clean. The two are still distinguishable: read `findings` and
 `undecided` in the `lint_summary` record, and the `outcome` field of each
 `doc_lint_*` record.
+
+### Opt-in two-threshold policy gate
+
+```sh
+comment-free --check-doc-budget --doc-advisory-words 80 --doc-max-words 120 --max-warning-files 0 .
+```
+
+Both thresholds must be explicit nonnegative integers, advisory ≤ enforced;
+zero and equal thresholds are valid. The repository chooses its own numbers.
+`--doc-advisory-words` requires the gate; rewrite, dry-run and the deprecated
+rewrite alias conflict with it. Existing default lint remains unchanged.
+
+Gate exits: **0** decided pass (including advisory findings), **1** decided
+enforced breach, **2** unknown/error. Unknown dominates breaches: either
+threshold having undecided items, any read/walk/parse error, empty Rust scope,
+invalid configuration, counter overflow or output failure prevents pass/fail.
+A nonempty docless Rust scope can pass. Signals/crashes cannot promise exit 2;
+consumers must never interpret absent output or an unexpected exit as pass.
+
+Each file is read and parsed once; the unchanged analyzer runs independently
+at both thresholds on the same AST. Filtering advisory findings is incorrect:
+90 unconditional words plus unresolved conditional docs can be a finding at
+80 but undecided at 120. Macro expansion and existing semantic exclusions
+remain unchanged.
+
+`policy_summary` and threshold-tagged `policy_detail` each use independent
+version 1 with **`kind`/`version`**, unlike legacy **`record`/`v`** envelopes.
+Stderr may mix the policy summary with legacy `run_error` v3 diagnostics.
+See [the exact schema](docs/record-format.md#policy-gate-records-version-1).
+Faults may emit plain diagnostics and exit 2 without a final summary; broken
+stderr may deliver nothing. Always reconcile records with the process exit.
+
+The warning-file cap applies independently to each threshold (at most 2N file
+selections, not unique files). Cap 0 emits no stdout records. Totals remain
+complete, with shown/hidden partitions; never sum the two cumulative budgets
+as unique items. Hints retain at most 50 items per threshold, 100 combined.
+Sorted paths, one source/AST and one threshold report remain workload-sized;
+hint path/label bytes, per-file records and diagnostics have no byte quota.
+This is not a process-memory, heap-byte or zero-allocation guarantee.
+
+Policy acceptance tests additionally require Python 3.9+ and the pinned
+`rustc` on PATH; Python's standard library performs independent strict JSON
+validation and the compiler validates a real planted source violation.
 
 ### Bounded warning details
 

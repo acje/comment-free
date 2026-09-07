@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 #![warn(clippy::missing_const_for_fn)]
+mod policy;
+mod policy_run;
 use clap::Parser;
 use comment_free::{
     CommentFreeError, DirectorySelection, DocBudget, DocLintKind, FileOutcome, ReportScope,
@@ -151,12 +153,14 @@ struct Options {
     context: usize,
     #[arg(
         long,
-        default_value_t = 80,
+        default_value_if("check_doc_budget", "false", "80"),
         value_name = "N",
         help = "Word budget for doc-comment prose. Fenced code blocks (` ``` ` or `~~~`) are \
                 excluded from the count and do not consume the budget"
     )]
-    doc_max_words: usize,
+    doc_max_words: Option<usize>,
+    #[command(flatten)]
+    gate: GateOptions,
     #[arg(long, value_name = "N|unlimited", conflicts_with_all = ["rewrite", "rustdoc_link_idioms"], help = "Warning files with details (default 1); 0 is summary-only; all files still scanned")]
     max_warning_files: Option<WarningLimit>,
     #[arg(
@@ -168,6 +172,18 @@ struct Options {
     )]
     rustdoc_link_idioms: bool,
 }
+#[derive(clap::Args, Debug)]
+struct GateOptions {
+    #[arg(long, conflicts_with_all = ["rewrite", "dry_run", "rustdoc_link_idioms"], requires_all = ["doc_advisory_words", "doc_max_words"], help = "Opt-in policy gate: 0 pass, 1 enforced breach, 2 unknown/error")]
+    check_doc_budget: bool,
+    #[arg(
+        long,
+        requires = "check_doc_budget",
+        help = "Explicit advisory threshold; must not exceed --doc-max-words"
+    )]
+    doc_advisory_words: Option<usize>,
+}
+
 enum ArgvRejection {
     Renderable(Box<clap::Error>),
     ControlBearing,
@@ -284,7 +300,7 @@ impl Command {
             Self::Lint {
                 root,
                 budget: DocBudget {
-                    max_words: opts.doc_max_words,
+                    max_words: opts.doc_max_words.unwrap_or(80),
                 },
                 limit: opts.max_warning_files.unwrap_or(WarningLimit::Limited(1)),
             }
@@ -297,12 +313,37 @@ fn main() -> ExitCode {
         Ok(o) => o,
         Err(rejection) => return report_argv_rejection(&rejection),
     };
+    if opts.gate.check_doc_budget {
+        return run_policy_options(opts);
+    }
     match dispatch(opts) {
         Ok(verdict) => ExitCode::from(verdict),
         Err(e) => {
             eprintln!("error: {}", comment_free::single_line(&e.to_string()));
             ExitCode::from(&e)
         }
+    }
+}
+fn run_policy_options(opts: Options) -> ExitCode {
+    let thresholds = opts
+        .gate
+        .doc_advisory_words
+        .zip(opts.doc_max_words)
+        .and_then(|(advisory, enforced)| policy::Thresholds::new(advisory, enforced));
+    match (thresholds, InputScope::from_path(opts.root)) {
+        (Some(thresholds), Ok(root)) => ExitCode::from(policy_run::run(
+            &root,
+            thresholds,
+            opts.max_warning_files.unwrap_or(WarningLimit::Limited(1)),
+        )),
+        (None, _) => ExitCode::from(policy_run::report_unavailable(
+            &mut std::io::stderr().lock(),
+            "advisory threshold exceeds enforced threshold",
+        )),
+        (_, Err(_)) => ExitCode::from(policy_run::report_unavailable(
+            &mut std::io::stderr().lock(),
+            "invalid policy root",
+        )),
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

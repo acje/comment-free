@@ -24,8 +24,8 @@ UTF-8 is reported lossily.
 
 ## Versions
 
-Three independent version constants, each carried as the `v` field of its
-own record family:
+Three legacy independent version constants, each carried as the `v` field of
+its own record family (the opt-in policy families below use `version`):
 
 | Constant | Records | Current |
 |---|---|---|
@@ -46,6 +46,80 @@ A consumer **rejects** a record whose `v` exceeds the version it
 understands. A version is bumped only for a change that a correct
 consumer of the previous version cannot survive — see the compatibility
 rules below, which are designed so that most evolution needs no bump.
+
+## Policy gate records (version 1)
+
+Only `--check-doc-budget` emits these two independently versioned families.
+Their deliberate envelope is `kind` and `version`, not legacy `record` and
+`v`. Existing schemas and library constants are unchanged. A gate stderr
+stream may contain legacy `{"record":"run_error","v":3,...}` diagnostics
+alongside its policy summary. Dispatch on the appropriate envelope; a legacy
+lint-summary consumer cannot consume policy output unchanged.
+
+### `policy_summary`
+
+One final stderr object after successful accounting/output delivery:
+
+```json
+{"kind":"policy_summary","version":1,"root":".","scope":"recursive-directory","files":1,"errors":0,"max_warning_files":"0","verdict":"pass","reasons":[],"advisory":{},"enforced":{}}
+```
+
+The empty budget objects above are placeholders: each MUST have exactly these
+20 integer keys: `max_words`, `over_budget`, plus each of `findings`,
+`undecided`, `warning_files`, `configuration_dependent`,
+`unreadable_doc_payload`, `uninspected_macro_body` and its `_shown` and
+`_hidden` keys. Every total equals shown + hidden. `over_budget` equals
+`findings`; undecided equals the sum of its three causes, including separately
+for shown and hidden partitions. Counts are checked u32; `max_words` is a
+nonnegative platform usize. No `over_budget_shown/hidden` keys exist.
+
+Top-level keys are exactly those shown. `files` counts discovered source
+files, including read/parse failures; traversal errors increase `errors`
+without inventing a file. Both are checked u32. `scope` is `file` or
+`recursive-directory`, matching the selected CLI scope. Paths use lossy UTF-8
+display. `max_warning_files` is a normalized decimal string or `unlimited`.
+
+`verdict` is `pass`, `fail`, or `unknown`, corresponding to exits 0, 1, 2.
+`reasons` is a unique array in this order when applicable: `empty_scope`,
+`processing_error`, `advisory_undecided`, `enforced_undecided`,
+`enforced_violation`, `counter_overflow`, `output_error`. Pass includes
+advisory-only findings and has no reasons. Unknown outranks breach, but
+`enforced_violation` is retained alongside unknown reasons. Counter/output
+faults may omit the summary entirely; invalid partial counters are never
+serialized as exact. Stderr delivery itself can fail, even after summary
+bytes were written. A summary is not a substitute for checking the exit.
+
+### `policy_detail`
+
+Stdout objects have common keys `kind="policy_detail"`, `version=1`,
+`threshold="advisory"|"enforced"`, and `event`. The exact additional fields:
+
+| Event | Additional keys |
+|---|---|
+| `doc_lint_finding` | `outcome="finding"`, `path`, `line`, `item`, `budget`, `words`, `fail_closed` |
+| `doc_lint_hint` | `outcome="finding"`, `path`, `line`, `item`, `budget`, `words` |
+| `doc_lint_header` | `doctrine` (same text as the legacy header) |
+| `doc_lint_truncated` | `remaining` (admitted findings beyond the 50 hints) |
+| `doc_lint_undecided` | `outcome`, `path`, `line`, `item`, `budget`; conditional outcome additionally has `words`, `words_all_cfgs`, `fail_closed` |
+
+Undecided outcomes are `configuration_dependent`, `unreadable_doc_payload`,
+or `uninspected_macro_body`. Opaque causes never carry word/fence fields.
+All payload meanings/types match the legacy events below; the legacy `kind`
+value `overlong_doc` is replaced by the policy envelope, not duplicated.
+No nested legacy JSON, `record`, or `v` keys occur in policy details.
+
+The cap admits whole warning files separately per threshold in native path
+order; clean/error-only files consume no slots. Equal thresholds still have
+separate labels. At cap zero stdout is empty, shown counters zero, hidden
+counters equal totals. Hints come only from admitted findings, sorted by
+overshoot descending, ties in path/report order, at most 50 per threshold.
+Budgets are cumulative, not disjoint: never sum them into unique items/files.
+
+Validators reject duplicate/extra keys, unsupported versions and unknown
+discriminators; consumers preserve uncertainty on malformed or unsupported
+records. The compatibility principles below apply independently to each new
+family. Tests use an independent Python standard-library JSON decoder with
+duplicate rejection and exact key validation, not emitter self-parsing.
 
 ## Records
 

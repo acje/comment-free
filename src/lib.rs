@@ -2084,7 +2084,9 @@ impl DocLintReport {
     pub fn findings(&self) -> &[DocFinding] {
         &self.findings
     }
-    /// Items whose verdict depends on unresolved `cfg` predicates.
+    /// Items left undecided because of unresolved `cfg` predicates,
+    /// unreadable doc payloads, or uninspected doc-bearing macro bodies.
+    /// See [`UndecidedCause`] for each cause and its available evidence.
     #[must_use]
     pub fn undecided(&self) -> &[DocUndecided] {
         &self.undecided
@@ -2871,6 +2873,29 @@ mod atomic_write_tests {
     }
     #[cfg(unix)]
     #[test]
+    fn limitation_contract_hard_link_alias_keeps_original_contents() {
+        use std::os::unix::fs::MetadataExt as _;
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("a.rs");
+        let alias = td.path().join("alias.rs");
+        let original = "// drop me\nfn f() {}\n";
+        fs::write(&path, original).unwrap();
+        fs::hard_link(&path, &alias).unwrap();
+        let original_inode = fs::metadata(&path).unwrap().ino();
+        assert_eq!(fs::metadata(&alias).unwrap().ino(), original_inode);
+
+        assert!(matches!(
+            process_file(&path, write_opts()),
+            FileOutcome::Rewritten(_)
+        ));
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "fn f() {}\n");
+        assert_eq!(fs::read_to_string(&alias).unwrap(), original);
+        assert_eq!(fs::metadata(&alias).unwrap().ino(), original_inode);
+        assert_ne!(fs::metadata(&path).unwrap().ino(), original_inode);
+    }
+    #[cfg(unix)]
+    #[test]
     fn rewrite_preserves_the_destination_file_mode() {
         use std::os::unix::fs::PermissionsExt as _;
         let td = tempfile::tempdir().unwrap();
@@ -3522,6 +3547,33 @@ doc = " ```")] #[doc = " w11 w12 w13 w14 w15"] pub fn foo() {}
         assert!(r.findings().is_empty(), "{:?}", r.findings());
         assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
         assert!(cfg_bounds(&r.undecided()[0]).0.is_fail_closed());
+    }
+    #[test]
+    fn limitation_contract_shadowed_concat_stays_unreadable_without_word_counts() {
+        let f = file(
+            r#"
+macro_rules! concat { ($($t:tt)*) => { "one two three four" }; }
+#[doc = concat!("short")] pub fn foo() {}
+"#,
+        );
+        let r = report(&f, 1);
+        assert!(r.findings().is_empty(), "{:?}", r.findings());
+        assert_eq!(r.undecided().len(), 1, "{:?}", r.undecided());
+        let undecided = &r.undecided()[0];
+        assert_eq!(undecided.item_label(), "fn foo");
+        assert!(matches!(
+            undecided.cause(),
+            super::UndecidedCause::UnreadableDocPayload
+        ));
+        let record = super::doc_lint_undecided_record(
+            super::DocLintKind::OverlongDoc,
+            std::path::Path::new("shadowed.rs"),
+            undecided,
+        );
+        assert!(record.contains("\"outcome\":\"unreadable_doc_payload\""));
+        for field in ["words", "words_all_cfgs", "fail_closed"] {
+            assert!(!record.contains(&format!("\"{field}\":")), "{record}");
+        }
     }
     #[test]
     fn a_concat_doc_expression_is_undecided_not_clean() {

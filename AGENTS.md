@@ -69,6 +69,13 @@ CF-0001 through CF-0006 are Accepted retrospective records; existing governing
 documentation remains authoritative. Acceptance introduces no new policy.
 Do not import upstream AFM or example CHE decisions.
 
+CF-0007 is a separate prospective Accepted decision for the explicitly
+authorized opt-in two-threshold gate. It does not rewrite the six retrospective
+records or alter legacy lint/rewrite exits. Policy records deliberately use
+`kind`/`version`; gate diagnostics may retain legacy `record`/`v` envelopes.
+Policy acceptance tests require Python 3.9+ (standard library only) and the
+pinned rustc; run `cargo test --locked --test policy_gate` locally.
+
 Install the same canonical revision used by the dedicated ADR CI job:
 
 ```sh

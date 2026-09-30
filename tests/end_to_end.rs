@@ -568,19 +568,19 @@ impl Record {
     fn text(&self, key: &str) -> &str {
         match self.get(key) {
             Field::Text(t) => t,
-            other => panic!("field `{key}` is not a string: {other:?}"),
+            Field::Number(_) | Field::Bool(_) => panic!("field `{key}` is not a string"),
         }
     }
     fn number(&self, key: &str) -> u32 {
         match self.get(key) {
             Field::Number(n) => *n,
-            other => panic!("field `{key}` is not a number: {other:?}"),
+            Field::Text(_) | Field::Bool(_) => panic!("field `{key}` is not a number"),
         }
     }
     fn boolean(&self, key: &str) -> bool {
         match self.get(key) {
             Field::Bool(b) => *b,
-            other => panic!("field `{key}` is not a boolean: {other:?}"),
+            Field::Text(_) | Field::Number(_) => panic!("field `{key}` is not a boolean"),
         }
     }
     fn name(&self) -> &str {

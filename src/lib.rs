@@ -1,5 +1,6 @@
 //! Pure logic for the `comment-free` tool: parse, re-emit, lint doc-comment budget.
 #![forbid(unsafe_code)]
+#![allow(clippy::wildcard_enum_match_arm)]
 #![warn(clippy::missing_const_for_fn)]
 use ra_ap_rustc_lexer::{FrontmatterAllowed, TokenKind, tokenize};
 use similar::{ChangeTag, TextDiff};
@@ -198,7 +199,6 @@ impl std::ops::AddAssign for RewriteCounts {
 }
 /// All terminal-error variants raised by the `comment-free` binary.
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum CommentFreeError {
     /// ROOT path passed on the CLI is not a directory.
     #[error("ROOT is not a directory")]
@@ -331,7 +331,6 @@ impl RewritePreview {
 /// Map a variant to its record field with [`FileError::kind`] and to
 /// its operator-facing text through [`std::fmt::Display`].
 #[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
 pub enum FileError {
     /// The file could not be parsed as Rust, so the doc-link pass could
     /// not run. The file is untouched on disk.

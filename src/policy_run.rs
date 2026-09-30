@@ -341,7 +341,7 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         let file = td.path().join("input.rs");
         std::fs::write(&file, [0xff]).unwrap();
-        let file_root = InputScope::from_path(Some(file.clone())).unwrap();
+        let file_root = InputScope::from_path(Some(file)).unwrap();
         let walk_dir = td.path().join("walk");
         std::fs::create_dir(&walk_dir).unwrap();
         std::os::unix::fs::symlink(walk_dir.join("absent.rs"), walk_dir.join("link.rs")).unwrap();

@@ -11,6 +11,15 @@ comment-hygiene tool. Default mode is read-only and lints doc-comment
 length; `--rewrite` strips non-doc comments and canonicalises rustdoc
 link idioms in place. See `README.md` for modes and exit codes.
 
+- House Style: `attended-app` (as mapped in `sf-sdlc.toml`).
+- Exit codes adhere strictly to the fleet tri-state taxonomy:
+  - `0`: clean pass / compliant / all assertions verified.
+  - `1`: domain defect / violation / finding flagged.
+  - `2`: unknown / environmental error / missing permission / indeterminate.
+- Stream separation: structured machine-readable findings (TSV, JSON Lines)
+  stream to `stdout`; operational telemetry, diagnostic logs, and error traces
+  route to `stderr`.
+
 This tool is the mechanical enforcement surface for the fleet house
 rule "no non-doc comments in Rust source". It preserves doc comments and
 nothing else: there is no `// SAFETY:` carve-out and no marker allowlist.
@@ -18,16 +27,42 @@ nothing else: there is no `// SAFETY:` carve-out and no marker allowlist.
 Machine-readable lint and rewrite records are JSON Lines; the grammar and
 its compatibility rules live in `docs/record-format.md`.
 
-## Build / test / lint
+## Verification tiers (three-tier cadence)
 
-```sh
-cargo build --locked
-cargo test --locked
-cargo clippy --all-targets --locked -- -D warnings
-cargo fmt --all -- --check
-cargo deny check
-cargo audit
-```
+Verification is strictly tier-scoped. A claim is backed by the tier whose scope
+matches the claim: sub-missions are backed by MID; epics and releases are backed
+by BOUNDARY.
+
+- **INNER** (every hopper TDD increment and per-review-round re-verification;
+  changed crate ONLY; exit-code criterion: test + clippy exit 0):
+  ```sh
+  CARGO_TERM_PROGRESS_WHEN=never cargo test -p comment-free --locked --message-format=short
+  CARGO_TERM_PROGRESS_WHEN=never cargo clippy -p comment-free --all-targets --locked --message-format=short -- -D warnings
+  ```
+  `--all-targets` is mandatory on clippy to catch test/bench/example lints.
+  `--workspace` and `--all-features` are forbidden at this tier.
+
+- **MID** (once at sub-mission completion before done-claim; changed crates
+  plus their reverse-dependent closure; exit-code criterion: test + clippy exit 0):
+  ```sh
+  cargo test --all-targets --locked
+  cargo clippy --all-targets --locked -- -D warnings
+  cargo fmt --all -- --check
+  ```
+  `--workspace` is forbidden at this tier; verify stays scoped to the affected closure.
+
+- **BOUNDARY** (once per epic before epic done-claim; full workspace; exit 0 across all):
+  ```sh
+  cargo build --all-targets --locked
+  timeout 900 cargo test --locked --no-fail-fast
+  cargo clippy --all-targets --locked -- -D warnings
+  cargo fmt --all -- --check
+  sh scripts/verify.sh
+  ```
+  - `timeout 900` is mandatory on the test line. Exit 124 is `Outcome::Surprise`,
+    NEVER a test failure. Investigate the stall; do not fold it into a failure count.
+  - `--no-fail-fast` is mandatory on the test line to ensure full blast-radius
+    visibility in a single pass.
 
 - `clippy::pedantic` is the standing bar (`[lints.clippy] pedantic =
   warn` in `Cargo.toml`), not an elevation — new code passes it with
@@ -111,3 +146,12 @@ that installed revision exited 0 and emitted 17 tagged rules for `comment-free`;
 Use `docs/adr/TEMPLATE.md` for source-backed
 records, not a duplicate index. Keep `docs/adr/stale/` present even without
 retired decisions; `.gitkeep` preserves the empty directory.
+
+## Non-Interactive Shell Execution & Bash Hygiene
+
+Subagents run non-interactively. Any command that could trigger an interactive
+y/n prompt stalls execution indefinitely.
+- Use explicit non-interactive flags: `cp -f`, `rm -f`, `rm -rf`.
+- Git operations: use non-interactive commands; no interactive rebase (`git rebase -i`).
+- Tooling CLI options: accept batch flags (`--batch`, `-y`, `--quiet`).
+

@@ -109,7 +109,9 @@ pub(crate) fn summary(
     };
     let mut out = Object::new();
     out.text("kind", "policy_summary");
-    out.number("version", 1);
+    out.number("version", 2);
+    out.text("coverage", "bounded-source");
+    out.text("next_step", "Review findings; inspect macro expansions separately; repair errors or required undecided docs and rerun.");
     out.text("root", &root.to_string_lossy());
     out.text("scope", scope.as_str());
     out.number("files", files);
@@ -158,12 +160,17 @@ pub(crate) enum Event<'a> {
 pub(crate) fn detail(threshold: Threshold, event: Event<'_>) -> String {
     let mut out = Object::new();
     out.text("kind", "policy_detail");
-    out.number("version", 1);
+    out.number("version", 2);
     out.text("threshold", threshold.name());
     out.text(
         "event",
         match event {
             Event::Finding(..) => "doc_lint_finding",
+            Event::Undecided(_, item)
+                if matches!(item.cause(), UndecidedCause::UninspectedMacroBody) =>
+            {
+                "coverage_limitation"
+            }
             Event::Undecided(..) => "doc_lint_undecided",
             Event::Hint(..) => "doc_lint_hint",
             Event::Header => "doc_lint_header",
@@ -243,7 +250,7 @@ mod tests {
                 Event::Truncated(1),
             ] {
                 let record = detail(threshold, event);
-                assert!(record.starts_with("{\"kind\":\"policy_detail\",\"version\":1,"));
+                assert!(record.starts_with("{\"kind\":\"policy_detail\",\"version\":2,"));
                 assert!(!record.contains('\n'));
                 line(&mut Vec::new(), &record).unwrap();
                 assert_eq!(line(&mut &mut [][..], &record), Err(Fault::Output));

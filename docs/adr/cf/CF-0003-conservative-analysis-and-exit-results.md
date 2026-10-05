@@ -23,6 +23,8 @@ indeterminates, and processing errors.
 
 ## Decision
 
+CF-0008 clarifies R1 gate applicability; R2/R3 and strict legacy analysis remain unchanged.
+
 Keep uncertainty visible rather than treating unreadable payloads as zero
 words or summing mutually exclusive configurations into a proven finding.
 

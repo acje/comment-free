@@ -2,7 +2,7 @@ use super::{InputScope, retain_hint};
 use crate::policy::records::{self, Event, Threshold};
 use crate::policy::{Fault, Policy, Thresholds, Verdict};
 use comment_free::{
-    DocBudget, DocLintReport, RunErrorKind, WarningLimit, doc_lint_file, run_error_record,
+    DocBudget, DocLintReport, RunErrorKind, WarningLimit, doc_budget_source_file, run_error_record,
 };
 use std::io::Write;
 use std::path::Path;
@@ -15,7 +15,7 @@ trait Source {
         syn::parse_file(source)
     }
     fn lint(&mut self, ast: &syn::File, max_words: usize) -> DocLintReport {
-        doc_lint_file(ast, DocBudget { max_words })
+        doc_budget_source_file(ast, DocBudget { max_words })
     }
 }
 
@@ -190,7 +190,7 @@ mod tests {
 
         fn lint(&mut self, ast: &syn::File, max_words: usize) -> DocLintReport {
             self.asts.push(std::ptr::from_ref(ast));
-            doc_lint_file(ast, DocBudget { max_words })
+            doc_budget_source_file(ast, DocBudget { max_words })
         }
     }
 
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn policy_hint_item_high_water_and_capacity() {
         let ast = syn::parse_file("#[doc = \"one two\"] fn item() {}").unwrap();
-        let report = doc_lint_file(&ast, DocBudget { max_words: 0 });
+        let report = doc_budget_source_file(&ast, DocBudget { max_words: 0 });
         let mut hints = [Vec::with_capacity(50), Vec::with_capacity(50)];
         let mut high_water = 0;
         for _ in 0..1000 {

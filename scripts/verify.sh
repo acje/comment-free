@@ -35,4 +35,10 @@ cargo clippy --all-targets --locked -- -D warnings
 echo "==> Running cargo fmt check..."
 cargo fmt --all -- --check
 
+echo "==> Running native bounded-source doc-budget dogfood gate..."
+cargo run --quiet --locked -- --check-doc-budget --doc-advisory-words 80 --doc-max-words 120 --max-warning-files 0 .
+
+echo "==> Running read-only rewrite dogfood preview..."
+cargo run --quiet --locked -- --rewrite --dry-run .
+
 echo "==> All comment-free verification checks passed."

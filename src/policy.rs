@@ -221,8 +221,10 @@ impl Policy {
     pub(super) const fn verdict(&self) -> Verdict {
         match (
             self.accounting,
-            self.advisory.undecided.total(),
-            self.enforced.undecided.total(),
+            self.advisory.configuration_dependent.total() != 0
+                || self.advisory.unreadable_doc_payload.total() != 0,
+            self.enforced.configuration_dependent.total() != 0
+                || self.enforced.unreadable_doc_payload.total() != 0,
             self.enforced.findings.total(),
         ) {
             (
@@ -233,10 +235,10 @@ impl Policy {
                 _,
                 _,
             )
-            | (_, 1.., _, _)
-            | (_, _, 1.., _) => Verdict::Unknown,
-            (_, 0, 0, 1..) => Verdict::Fail,
-            (_, 0, 0, 0) => Verdict::Pass,
+            | (_, true, _, _)
+            | (_, _, true, _) => Verdict::Unknown,
+            (_, false, false, 1..) => Verdict::Fail,
+            (_, false, false, 0) => Verdict::Pass,
         }
     }
 
@@ -255,10 +257,10 @@ impl Policy {
             Accounting::Failed(Fault::UnsupportedCause) => reasons.push("processing_error"),
             Accounting::Failed(Fault::Output) => reasons.push("output_error"),
         }
-        if self.advisory.undecided.total() != 0 {
+        if self.advisory.undecided.total() != self.advisory.uninspected_macro_body.total() {
             reasons.push("advisory_undecided");
         }
-        if self.enforced.undecided.total() != 0 {
+        if self.enforced.undecided.total() != self.enforced.uninspected_macro_body.total() {
             reasons.push("enforced_undecided");
         }
         if self.enforced.findings.total() != 0 {

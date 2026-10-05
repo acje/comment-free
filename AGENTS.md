@@ -120,10 +120,13 @@ before publishing or bumping dependencies.
 ### Rustdoc Budget Gate
 Run the same native check from the repository root locally and in CI:
 ```sh
-comment-free --check-doc-budget --doc-advisory-words 80 --doc-max-words 120 --max-warning-files 0 .
+cargo run --quiet --locked -- --check-doc-budget --doc-advisory-words 80 --doc-max-words 120 --max-warning-files 0 .
 ```
 
-Requires comment-free 0.2.0 at the canonical revision below:
+Self-dogfood builds this checkout; `scripts/verify.sh` and CI run that exact
+native gate command, followed by the read-only rewrite preview. Installed
+consumers remain on comment-free 0.2.0 at the canonical revision below until
+publication/adoption is authorized:
 ```sh
 cargo +1.98.0 install --git https://github.com/acje/comment-free --rev e45de7ef3b0fcd9a1ec299b9026b14fb5b0cf534 --locked comment-free
 ```
@@ -133,9 +136,14 @@ tool's build/hidden pruning: 80 prose words is advisory; 120 is enforced.
 Fenced code is excluded by the tool. Summary-only output retains full totals
 while suppressing finding details; diagnostics remain visible.
 Native gate exits are 0 for pass, 1 for enforced breach, and 2 for
-unknown/error, including undecided payloads or empty scope. Policy and its
-implementation/tests/proofs belong upstream; repository checks establish
-integration only. No rewrite mode runs.
+unknown/error, including required nonmacro undecided payloads or empty scope.
+CF-0008 changes the source gate to policy records v2: macro coverage does not
+block its bounded verdict; nonmacro required uncertainty and real faults do.
+The installed revision above remains legacy; use `cargo run --locked --` from
+this canonical checkout to verify new source until publication is authorized.
+Policy implementation/tests/proofs belong upstream; repository checks establish
+integration only. The rewrite dry-run checks pending hygiene changes but writes
+no files; successful gate output is not a rewrite-cleanliness verdict.
 Macro-generated docs without spelled `doc` tokens remain outside detection;
 this is not proof of semantic documentation coverage or process-memory bounds.
 
@@ -180,6 +188,7 @@ CF-0001 through CF-0006 are Accepted retrospective records; existing governing
 documentation remains authoritative. Acceptance introduces no new policy.
 Do not import upstream AFM or example CHE decisions.
 
+CF-0008 supersedes CF-0007 R2/R3 and clarifies CF-0003 R1 gate applicability.
 CF-0007 is a separate prospective Accepted decision for the explicitly
 authorized opt-in two-threshold gate. It does not rewrite the six retrospective
 records or alter legacy lint/rewrite exits. Policy records deliberately use

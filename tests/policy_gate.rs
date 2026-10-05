@@ -82,6 +82,41 @@ fn documented(words: usize, name: &str) -> String {
 }
 
 #[test]
+fn policy_macro_blocks_are_independent_with_visible_coverage() {
+    let td = tempfile::tempdir().unwrap();
+    let path = td.path().join("input.rs");
+    for (words, exit) in [(120, 0), (121, 1), (120, 0)] {
+        let source = format!(
+            "macro_rules! visible {{ () => {{ {} {} }}; }}",
+            documented(words, "first"),
+            documented(70, "second")
+        );
+        std::fs::write(&path, source).unwrap();
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_comment-free"))
+            .args([
+                "--check-doc-budget",
+                "--doc-advisory-words",
+                "80",
+                "--doc-max-words",
+                "120",
+                "--max-warning-files",
+                "0",
+            ])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(exit), "{out:?}");
+        eprintln!("macro guard proof: words={words}; raw_exit={exit}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("\"coverage\":\"bounded-source\""));
+        let legacy = std::process::Command::new(env!("CARGO_BIN_EXE_comment-free"))
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert_eq!(legacy.status.code(), Some(4));
+    }
+}
+
+#[test]
 fn policy_cli_rejects_incomplete_thresholds_and_conflicts() {
     let td = tempfile::tempdir().unwrap();
     for args in [

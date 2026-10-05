@@ -48,8 +48,8 @@ jobs:
         if: always()
       - run: cargo test --all-features --locked
         if: always()
-      - name: dogfood — doc-comment lint on own source
-        run: cargo run --quiet --locked -- .
+      - name: dogfood — bounded-source doc-budget gate on own source
+        run: cargo run --quiet --locked -- --check-doc-budget --doc-advisory-words 80 --doc-max-words 120 --max-warning-files 0 .
         if: always()
       - name: dogfood — no non-doc comments in own source
         run: cargo run --quiet --locked -- --rewrite --dry-run .

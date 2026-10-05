@@ -27,6 +27,8 @@ in [policy evaluation](../../../src/policy.rs),
 
 ## Decision
 
+CF-0008 supersedes R2/R3 for the native gate; other rules remain binding.
+
 R1 [5]: Require explicit ordered nonnegative advisory and enforced thresholds for the opt-in gate; preserve legacy lint, rewrite, library, and record behavior outside that mode.
 
 R2 [5]: Return zero for decided pass including advisory findings, one for decided enforced breach, and two for unknown or error; either threshold's uncertainty, processing faults, or empty Rust scope outranks breach.

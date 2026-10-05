@@ -113,23 +113,30 @@ zero and equal thresholds are valid. The repository chooses its own numbers.
 `--doc-advisory-words` requires the gate; rewrite, dry-run and the deprecated
 rewrite alias conflict with it. Existing default lint remains unchanged.
 
-Gate exits: **0** decided pass (including advisory findings), **1** decided
+CF-0008 selects bounded source coverage: contiguous literal doc blocks inside
+macro tokens are evaluated independently, without expansion or multiplicity.
+Macro coverage limitations are separate from errors and required uncertainty.
+This is a contiguous-token approximation: an interleaved non-doc attribute
+splits a block, so one generated item's combined prose can be under-counted.
+Inspect expansions separately; repair errors/required undecided docs and rerun.
+
+Gate exits: **0** bounded pass (including advisory findings), **1** decided
 enforced breach, **2** unknown/error. Unknown dominates breaches: either
-threshold having undecided items, any read/walk/parse error, empty Rust scope,
+threshold having required nonmacro undecided items, any read/walk/parse error, empty Rust scope,
 invalid configuration, counter overflow or output failure prevents pass/fail.
 A nonempty docless Rust scope can pass. Signals/crashes cannot promise exit 2;
 consumers must never interpret absent output or an unexpected exit as pass.
 
-Each file is read and parsed once; the unchanged analyzer runs independently
+Each file is read and parsed once; the bounded-source analyzer runs independently
 at both thresholds on the same AST. Filtering advisory findings is incorrect:
 90 unconditional words plus unresolved conditional docs can be a finding at
 80 but undecided at 120. Macro expansion and existing semantic exclusions
 remain unchanged.
 
 `policy_summary` and threshold-tagged `policy_detail` each use independent
-version 1 with **`kind`/`version`**, unlike legacy **`record`/`v`** envelopes.
+version 2 with **`kind`/`version`**, unlike legacy **`record`/`v`** envelopes.
 Stderr may mix the policy summary with legacy `run_error` v3 diagnostics.
-See [the exact schema](docs/record-format.md#policy-gate-records-version-1).
+See [the exact schema](docs/record-format.md#policy-gate-records-version-2).
 Faults may emit plain diagnostics and exit 2 without a final summary; broken
 stderr may deliver nothing. Always reconcile records with the process exit.
 
@@ -188,7 +195,7 @@ in default lint mode.
 
 ### Known limitation: doc attributes inside macro bodies
 
-The same holds for a doc attribute inside a macro token body, whether a
+In legacy default lint, the same holds for a doc attribute inside a macro token body, whether a
 `macro_rules!` definition or the tokens passed to an invocation:
 
 ```rust
@@ -205,6 +212,10 @@ prose documents, or how many times. The body is reported as
 `outcome` `uninspected_macro_body`, naming the file and the macro, and
 does not count as clean. The report is made once, at the outermost
 opaque body.
+
+The opt-in policy gate instead checks visible literal source blocks and emits
+the body's uncertainty as separate coverage evidence (CF-0008); that coverage
+alone does not block a bounded pass.
 
 A macro body carrying **no** doc attribute is not reported: the check is
 for an attribute group containing `doc =`, so ordinary `println!` and

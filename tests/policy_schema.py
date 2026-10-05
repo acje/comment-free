@@ -41,9 +41,11 @@ def validate(record):
         assert record["kind"] in ("walk", "io", "parse", "conflict")
         assert all(type(record[k]) is str for k in ("path", "message"))
         return
-    assert type(record["version"]) is int and record["version"] == 1
+    assert type(record["version"]) is int and record["version"] == 2
     if record["kind"] == "policy_summary":
-        keys(record, "kind version root scope files errors max_warning_files verdict reasons advisory enforced")
+        keys(record, "kind version coverage next_step root scope files errors max_warning_files verdict reasons advisory enforced")
+        assert record["coverage"] == "bounded-source"
+        assert type(record["next_step"]) is str and record["next_step"]
         assert record["verdict"] in ("pass", "fail", "unknown")
         assert record["scope"] in ("file", "recursive-directory")
         assert type(record["root"]) is str
@@ -79,8 +81,8 @@ def validate(record):
         expected_reasons = [name for name, applies in (
             ("empty_scope", record["files"] == 0),
             ("processing_error", record["errors"] > 0),
-            ("advisory_undecided", record["advisory"]["undecided"] > 0),
-            ("enforced_undecided", record["enforced"]["undecided"] > 0),
+            ("advisory_undecided", record["advisory"]["undecided"] > record["advisory"]["uninspected_macro_body"]),
+            ("enforced_undecided", record["enforced"]["undecided"] > record["enforced"]["uninspected_macro_body"]),
             ("enforced_violation", record["enforced"]["findings"] > 0),
         ) if applies]
         assert record["reasons"] == expected_reasons
@@ -103,7 +105,8 @@ def validate(record):
                 if event == "doc_lint_finding":
                     extra += " fail_closed"
             else:
-                assert event == "doc_lint_undecided"
+                assert event in ("doc_lint_undecided", "coverage_limitation")
+                assert (event == "coverage_limitation") == (record["outcome"] == "uninspected_macro_body")
                 assert record["outcome"] in causes
                 if record["outcome"] == "configuration_dependent":
                     extra += " words words_all_cfgs fail_closed"
@@ -168,6 +171,11 @@ with tempfile.TemporaryDirectory() as directory:
                 code, details, summary = run(path, a, e, cap)
                 if cap == "0":
                     assert not details
+                if sample.startswith('macro_rules! opaque'):
+                    assert code == (1 if e == 0 else 0)
+                    assert summary["enforced"]["uninspected_macro_body"] == 1
+                    assert summary["enforced"]["findings"] == int(e == 0)
+                    continue
                 for threshold, words in (("advisory", a), ("enforced", e)):
                     legacy = subprocess.run([sys.argv[1], "--doc-max-words", str(words), "--max-warning-files", cap, str(path)], capture_output=True, check=False)
                     total = records(legacy.stderr, False)[-1]
@@ -184,7 +192,7 @@ with tempfile.TemporaryDirectory() as directory:
                         event = old.pop("record")
                         old.pop("v")
                         old.pop("kind")
-                        assert new == dict(old, kind="policy_detail", version=1, threshold=threshold, event=event)
+                        assert new == dict(old, kind="policy_detail", version=2, threshold=threshold, event=event)
     path.unlink()
     assert run(root)[0] == 2
     path.write_text("fn docless() {}")
@@ -215,7 +223,7 @@ with tempfile.TemporaryDirectory() as directory:
         else:
             raise AssertionError(f"validator accepted {field}={bad!r}")
     text = json.dumps(clean)
-    mutants = [text.replace('"version": 1', '"version": 2'), text[:-1] + ',"extra":0}', text[:-1] + ',"version":1}']
+    mutants = [text.replace('"version": 2', '"version": 3'), text.replace('"version": 2', '"version": 1'), text[:-1] + ',"extra":0}', text[:-1] + ',"version":2}']
     nested = text.replace('"max_words": 80', '"max_words":80,"max_words":80')
     for mutation in mutants + [nested]:
         try:
@@ -271,7 +279,7 @@ with tempfile.TemporaryDirectory() as directory:
             truncated = [d for d in events if d["event"] == "doc_lint_truncated"]
             assert [d["remaining"] for d in truncated] == ([selected * 60 - 50] if selected else [])
             if events:
-                for mutation in (dict(events[0], version=2), dict(events[0], extra=0), dict(events[0], threshold="bogus"), dict(events[0], event="bogus"), dict(events[0], words=-1), dict(events[0], path=0), dict(events[0], item=False), dict(events[0], fail_closed=0)):
+                for mutation in (dict(events[0], version=3), dict(events[0], extra=0), dict(events[0], threshold="bogus"), dict(events[0], event="bogus"), dict(events[0], words=-1), dict(events[0], path=0), dict(events[0], item=False), dict(events[0], fail_closed=0)):
                     try:
                         validate(mutation)
                     except AssertionError:

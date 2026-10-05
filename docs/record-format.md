@@ -47,7 +47,22 @@ understands. A version is bumped only for a change that a correct
 consumer of the previous version cannot survive — see the compatibility
 rules below, which are designed so that most evolution needs no bump.
 
-## Policy gate records (version 1)
+## Policy gate records (version 2)
+
+CF-0008 supersedes the version-one gate predicate. Both policy families are
+version 2; legacy families remain unchanged. Summary keys additionally include
+`coverage="bounded-source"` and a nonempty string `next_step`. Contiguous
+literal doc attributes inside macro tokens count independently as source
+blocks, labelled `macro NAME source block`, once per visible spelling.
+No expansion, repetition multiplicity or generated-item attribution is claimed.
+An interleaved non-doc attribute splits the contiguous block; this approximation
+can under-count an expanded item's combined documentation.
+Macro undecided counters are coverage counts only; required undecided equals
+`undecided - uninspected_macro_body`. Only required undecided dominates verdicts.
+Macro detail events are `coverage_limitation`, not `doc_lint_undecided`.
+Nonliteral/conditional macro docs and synthesized prose remain unevaluated.
+Consumers must reject unsupported version 2 rather than reinterpret version 1.
+The shapes below describe version 2 except where explicitly contrasting legacy.
 
 Only `--check-doc-budget` emits these two independently versioned families.
 Their deliberate envelope is `kind` and `version`, not legacy `record` and
@@ -61,7 +76,7 @@ lint-summary consumer cannot consume policy output unchanged.
 One final stderr object after successful accounting/output delivery:
 
 ```json
-{"kind":"policy_summary","version":1,"root":".","scope":"recursive-directory","files":1,"errors":0,"max_warning_files":"0","verdict":"pass","reasons":[],"advisory":{},"enforced":{}}
+{"kind":"policy_summary","version":2,"coverage":"bounded-source","next_step":"Review findings; inspect macro expansions separately; repair errors or required undecided docs and rerun.","root":".","scope":"recursive-directory","files":1,"errors":0,"max_warning_files":"0","verdict":"pass","reasons":[],"advisory":{},"enforced":{}}
 ```
 
 The empty budget objects above are placeholders: each MUST have exactly these
@@ -83,7 +98,8 @@ display. `max_warning_files` is a normalized decimal string or `unlimited`.
 `reasons` is a unique array in this order when applicable: `empty_scope`,
 `processing_error`, `advisory_undecided`, `enforced_undecided`,
 `enforced_violation`, `counter_overflow`, `output_error`. Pass includes
-advisory-only findings and has no reasons. Unknown outranks breach, but
+advisory-only findings and has no reasons. Undecided reasons exclude macro
+coverage counts. Required uncertainty and errors outrank breach, but
 `enforced_violation` is retained alongside unknown reasons. Counter/output
 faults may omit the summary entirely; invalid partial counters are never
 serialized as exact. Stderr delivery itself can fail, even after summary
@@ -91,7 +107,7 @@ bytes were written. A summary is not a substitute for checking the exit.
 
 ### `policy_detail`
 
-Stdout objects have common keys `kind="policy_detail"`, `version=1`,
+Stdout objects have common keys `kind="policy_detail"`, `version=2`,
 `threshold="advisory"|"enforced"`, and `event`. The exact additional fields:
 
 | Event | Additional keys |
@@ -101,9 +117,11 @@ Stdout objects have common keys `kind="policy_detail"`, `version=1`,
 | `doc_lint_header` | `doctrine` (same text as the legacy header) |
 | `doc_lint_truncated` | `remaining` (admitted findings beyond the 50 hints) |
 | `doc_lint_undecided` | `outcome`, `path`, `line`, `item`, `budget`; conditional outcome additionally has `words`, `words_all_cfgs`, `fail_closed` |
+| `coverage_limitation` | `outcome="uninspected_macro_body"`, `path`, `line`, `item`, `budget`; no invented words |
 
-Undecided outcomes are `configuration_dependent`, `unreadable_doc_payload`,
-or `uninspected_macro_body`. Opaque causes never carry word/fence fields.
+Required undecided outcomes are `configuration_dependent` and
+`unreadable_doc_payload`; `uninspected_macro_body` belongs only to the
+`coverage_limitation` event. Opaque causes never carry word/fence fields.
 All payload meanings/types match the legacy events below; the legacy `kind`
 value `overlong_doc` is replaced by the policy envelope, not duplicated.
 No nested legacy JSON, `record`, or `v` keys occur in policy details.

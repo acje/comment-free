@@ -2106,6 +2106,22 @@ pub fn doc_lint_file(ast: &syn::File, budget: DocBudget) -> DocLintReport {
         budget,
         report: DocLintReport::default(),
         macro_name_hint: None,
+        bounded_source: false,
+    };
+    visitor.lint_attrs(&ast.attrs, "file-level", None);
+    syn::visit::Visit::visit_file(&mut visitor, ast);
+    visitor.report
+}
+
+/// Evaluate source-visible documentation, including literal macro doc blocks.
+/// Macro uncertainty remains in the report as coverage evidence, not expanded items.
+#[must_use]
+pub fn doc_budget_source_file(ast: &syn::File, budget: DocBudget) -> DocLintReport {
+    let mut visitor = DocLintVisitor {
+        budget,
+        report: DocLintReport::default(),
+        macro_name_hint: None,
+        bounded_source: true,
     };
     visitor.lint_attrs(&ast.attrs, "file-level", None);
     syn::visit::Visit::visit_file(&mut visitor, ast);
@@ -2115,8 +2131,58 @@ struct DocLintVisitor {
     budget: DocBudget,
     report: DocLintReport,
     macro_name_hint: Option<String>,
+    bounded_source: bool,
 }
 impl DocLintVisitor {
+    fn lint_macro_blocks(&mut self, tokens: proc_macro2::TokenStream, label: &str) {
+        use syn::parse::Parser as _;
+        let trees: Vec<_> = tokens.into_iter().collect();
+        let mut attrs = Vec::new();
+        let mut index = 0;
+        while index < trees.len() {
+            let width = match (&trees[index], trees.get(index + 1), trees.get(index + 2)) {
+                (proc_macro2::TokenTree::Punct(p), Some(proc_macro2::TokenTree::Group(g)), _)
+                    if p.as_char() == '#' && g.delimiter() == proc_macro2::Delimiter::Bracket =>
+                {
+                    2
+                }
+                (
+                    proc_macro2::TokenTree::Punct(p),
+                    Some(proc_macro2::TokenTree::Punct(b)),
+                    Some(proc_macro2::TokenTree::Group(g)),
+                ) if p.as_char() == '#'
+                    && b.as_char() == '!'
+                    && g.delimiter() == proc_macro2::Delimiter::Bracket =>
+                {
+                    3
+                }
+                _ => 0,
+            };
+            if width != 0 {
+                let tokens = trees[index..index + width].iter().cloned().collect();
+                let parser = if width == 3 {
+                    Attribute::parse_inner
+                } else {
+                    Attribute::parse_outer
+                };
+                if let Ok(parsed) = parser.parse2(tokens)
+                    && parsed.iter().all(|attr| matches!(&attr.meta, Meta::NameValue(value) if value.path.get_ident().is_some_and(|id| ident_is(id, "doc")) && matches!(&value.value, syn::Expr::Lit(value) if matches!(value.lit, syn::Lit::Str(_))))) {
+                        attrs.extend(parsed);
+                        index += width;
+                        continue;
+                }
+            }
+            self.lint_attrs(&attrs, &format!("{label} source block"), None);
+            attrs.clear();
+            if width == 0
+                && let proc_macro2::TokenTree::Group(group) = &trees[index]
+            {
+                self.lint_macro_blocks(group.stream(), label);
+            }
+            index += width.max(1);
+        }
+        self.lint_attrs(&attrs, &format!("{label} source block"), None);
+    }
     fn lint_attrs(&mut self, attrs: &[Attribute], label: &str, span_line: Option<usize>) {
         let Some(docs) = extract_doc_text(attrs) else {
             return;
@@ -2563,6 +2629,9 @@ impl<'ast> syn::visit::Visit<'ast> for DocLintVisitor {
         let hint = self.macro_name_hint.take();
         if macro_tokens_carry_doc_attribute(node.tokens.clone()) {
             let item_label = hint.unwrap_or_else(|| macro_invocation_label(node));
+            if self.bounded_source {
+                self.lint_macro_blocks(node.tokens.clone(), &item_label);
+            }
             self.report.undecided.push(DocUndecided {
                 item_label,
                 line: node.path.span().start().line,

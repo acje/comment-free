@@ -2,3 +2,4 @@
 .ooda/
 .beads*
 *.pem
+/graphify-out/

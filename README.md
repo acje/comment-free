@@ -39,14 +39,14 @@ files.
 ## Install
 
 ```sh
-cargo +1.98 install --git https://github.com/acje/comment-free --locked comment-free
+cargo +1.99.0 install --git https://github.com/acje/comment-free --locked comment-free
 ```
 
-The `+1.98` is load-bearing. `cargo install --git` **ignores the source
+The `+1.99.0` is load-bearing. `cargo install --git` **ignores the source
 repository's `rust-toolchain.toml`** and builds with the *invoking*
-toolchain; without the explicit `+1.98` the build fails on a older
-default toolchain, or silently succeeds on a newer one that this
-repository's CI never exercised. `--locked` is likewise mandatory: it
+toolchain; the explicit `+1.99.0` matches this checkout's compiler pin
+and CI configuration rather than using an older or newer default
+toolchain. `--locked` is likewise mandatory: it
 uses the committed `Cargo.lock`, so you get the dependency graph CI
 tested.
 
@@ -282,7 +282,7 @@ cargo deny check
 in `Cargo.toml`), not an elevation — new code passes it with zero
 warnings. `rustfmt` runs on **stable defaults only**; do not add a
 `rustfmt.toml` or `clippy.toml`. `rust-toolchain.toml` pins channel
-1.98.0.
+1.99.0.
 
 ### Architecture decisions
 
@@ -298,7 +298,7 @@ Install the canonical revision pinned in CI, with an explicit invoking
 toolchain because `cargo install --git` ignores the source toolchain pin:
 
 ```sh
-cargo +1.98.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
+cargo +1.99.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
 ```
 
 From the repository root:

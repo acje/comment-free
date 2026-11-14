@@ -107,7 +107,7 @@ by BOUNDARY.
   repo with no workspace, so do not reintroduce the inherited form.
 - `rustfmt` runs on **stable defaults only** — do not add a
   `rustfmt.toml` or `clippy.toml`.
-- `rust-toolchain.toml` pins channel 1.99.0 (clippy + rustfmt). Use it;
+- `rust-toolchain.toml` pins channel 1.100.0 (clippy + rustfmt). Use it;
   don't bump without cause.
 - `ra-ap-rustc_lexer` is pinned **exactly** (`=0.174.0`). It is an
   unstable-by-policy rustc internal published as a snapshot; a floating
@@ -128,7 +128,7 @@ native gate command, followed by the read-only rewrite preview. Installed
 consumers remain on comment-free 0.2.0 at the canonical revision below until
 publication/adoption is authorized:
 ```sh
-cargo +1.99.0 install --git https://github.com/acje/comment-free --rev e45de7ef3b0fcd9a1ec299b9026b14fb5b0cf534 --locked comment-free
+cargo +1.100.0 install --git https://github.com/acje/comment-free --rev e45de7ef3b0fcd9a1ec299b9026b14fb5b0cf534 --locked comment-free
 ```
 
 The read-only native gate recursively scans Rust sources under `.` with the
@@ -169,10 +169,10 @@ compile time. Enforced mechanically via `non-exhaustive-check` from the canonica
 ### Consumption
 Installed, not vendored:
 ```sh
-cargo +1.99.0 install --git https://github.com/acje/comment-free --locked comment-free
+cargo +1.100.0 install --git https://github.com/acje/comment-free --locked comment-free
 ```
 `cargo install --git` ignores this repo's `rust-toolchain.toml` and
-builds with the invoking toolchain, hence the explicit `+1.99.0` matching
+builds with the invoking toolchain, hence the explicit `+1.100.0` matching
 this checkout's compiler pin and CI configuration.
 
 ### Delivery
@@ -199,7 +199,7 @@ pinned rustc; run `cargo test --locked --test policy_gate` locally.
 
 Install the same canonical revision used by the dedicated ADR CI job:
 ```sh
-cargo +1.99.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
+cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
 ```
 
 From the repository root, run the local ADR checks and discovery commands:

@@ -2837,7 +2837,7 @@ mod walk_error_tests {
     #[test]
     fn the_rendered_message_survives_the_seal() {
         let err = a_walk_error();
-        assert!(!err.message().is_empty());
+        assert!(!err.message().is_empty(), "missing error message");
         assert!(
             err.to_string().contains(&err.message()),
             "display drops the source text: {err}"

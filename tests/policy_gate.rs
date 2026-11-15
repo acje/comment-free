@@ -72,7 +72,7 @@ fn policy_cli_boundary_and_unknown() {
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(exit), "{out:?}");
-        assert!(out.stdout.is_empty());
+        assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
         assert!(String::from_utf8_lossy(&out.stderr).contains("\"kind\":\"policy_summary\""));
     }
 }
@@ -138,7 +138,7 @@ fn policy_cli_rejects_incomplete_thresholds_and_conflicts() {
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
-        assert!(out.stdout.is_empty());
+        assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
     }
 }
 
@@ -181,7 +181,7 @@ fn policy_cli_caps_apply_per_threshold_and_bound_hints() {
             2
         );
         if cap == "0" {
-            assert!(stdout.is_empty());
+            assert!(stdout.is_empty(), "stdout: {stdout}");
         }
     }
 }

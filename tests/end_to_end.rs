@@ -104,7 +104,7 @@ fn cap_verdict_matrix() {
                 .unwrap();
             assert_eq!(out.status.code(), Some(expected), "{cap}: {out:?}");
             if cap == "0" || expected != 4 {
-                assert!(out.stdout.is_empty());
+                assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
             }
             let summary = one_record(&String::from_utf8_lossy(&out.stderr), "lint_summary");
             assert_eq!(summary.text("scope"), "file");
@@ -134,7 +134,7 @@ fn capped_io_failures_remain_visible() {
     make_readable(&file);
     for out in outputs {
         assert_eq!(out.status.code(), Some(5), "{out:?}");
-        assert!(out.stdout.is_empty());
+        assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
         assert_eq!(
             one_error(&String::from_utf8_lossy(&out.stderr), "io").text("path"),
             file.to_string_lossy()
@@ -258,8 +258,14 @@ fn warning_file_cap_preserves_full_verdict_and_counts() {
         }
         if shown == 1 {
             assert_eq!(records_named(&stdout, "doc_lint_undecided").len(), 1);
-            assert!(records_named(&stdout, "doc_lint_finding").is_empty());
-            assert!(records_named(&stdout, "doc_lint_hint").is_empty());
+            assert!(
+                records_named(&stdout, "doc_lint_finding").is_empty(),
+                "unexpected finding: {stdout}"
+            );
+            assert!(
+                records_named(&stdout, "doc_lint_hint").is_empty(),
+                "unexpected hint: {stdout}"
+            );
         }
     }
 }
@@ -365,7 +371,7 @@ fn explicit_leaf_symlinks_are_usage_errors_in_every_mode() {
         for args in [vec![], vec!["--rewrite", "--dry-run"], vec!["--rewrite"]] {
             let out = Command::new(bin()).args(args).arg(&link).output().unwrap();
             assert_eq!(out.status.code(), Some(2), "{out:?}");
-            assert!(out.stdout.is_empty());
+            assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
             assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
             assert_eq!(fs::read_to_string(&target).unwrap(), content);
         }
@@ -389,7 +395,7 @@ fn explicit_non_rust_and_missing_files_are_usage_errors() {
         for args in [vec![], vec!["--rewrite", "--dry-run"], vec!["--rewrite"]] {
             let out = Command::new(bin()).args(args).arg(&path).output().unwrap();
             assert_eq!(out.status.code(), Some(2), "{out:?}");
-            assert!(out.stdout.is_empty());
+            assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
         }
     }
 }
@@ -520,7 +526,7 @@ fn recursive_scope_includes_custom_sources_and_prunes_hidden_and_build_directori
                     assert_eq!(summary.text("scope"), "recursive-directory");
                     assert_eq!(summary.number("files"), 4);
                     assert_eq!(summary.number("findings_hidden"), 4);
-                    assert!(out.stdout.is_empty());
+                    assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
                 } else {
                     assert_eq!(one_record(&stderr, "strip_summary").number("rewritten"), 4);
                 }
@@ -2061,7 +2067,7 @@ fn lint_hint_record_is_a_json_object_with_named_fields() {
     let hint = one_record(&stdout, "doc_lint_hint");
     assert!(hint.text("path").ends_with("a.rs"), "{stdout}");
     assert!(hint.number("line") > 0, "line must be 1-indexed positive");
-    assert!(!hint.text("item").is_empty());
+    assert!(!hint.text("item").is_empty(), "missing hint item");
     assert_eq!(hint.number("words"), 6);
     assert_eq!(hint.number("budget"), 5);
     assert_eq!(hint.text("kind"), "overlong_doc");
@@ -2756,7 +2762,7 @@ fn a_nested_src_symlink_is_refused_in_every_mode() {
                     .text("path")
                     .ends_with("src")
             );
-            assert!(out.stdout.is_empty());
+            assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
             assert_eq!(
                 fs::read_to_string(real.join("m.rs")).unwrap(),
                 "// removable\nfn m() {}\n"

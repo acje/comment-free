@@ -324,7 +324,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(policy.verdict(), Verdict::Pass);
-        assert!(policy.reasons().is_empty());
+        assert!(policy.reasons().is_empty(), "unexpected policy reasons");
         assert_eq!(policy.advisory().findings().shown(), 0);
         assert_eq!(policy.enforced().undecided().hidden(), 0);
     }

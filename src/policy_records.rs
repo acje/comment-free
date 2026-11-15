@@ -253,7 +253,8 @@ mod tests {
                 assert!(record.starts_with("{\"kind\":\"policy_detail\",\"version\":2,"));
                 assert!(!record.contains('\n'));
                 line(&mut Vec::new(), &record).unwrap();
-                assert_eq!(line(&mut &mut [][..], &record), Err(Fault::Output));
+                let mut output: &mut [u8] = &mut [];
+                assert_eq!(line(&mut output, &record), Err(Fault::Output));
             }
         }
     }

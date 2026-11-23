@@ -45,7 +45,9 @@ tab-separated spellings are gone and are not emitted in any mode.
 A consumer **rejects** a record whose `v` exceeds the version it
 understands. A version is bumped only for a change that a correct
 consumer of the previous version cannot survive — see the compatibility
-rules below, which are designed so that most evolution needs no bump.
+rules below: additive fields and new record types need no bump, while
+the `kind` and `outcome` vocabularies are closed within a major release
+line.
 
 ## Policy gate records (version 2)
 
@@ -436,7 +438,7 @@ memory and huge single-file/error output are not bounded by this contract.
 
 ## Compatibility rules for consumers
 
-These rules are what make the format extensible without a version bump.
+These rules are what make the format safe to consume across versions.
 A consumer that follows them keeps working as the tool grows; one that
 does not is not a conforming consumer.
 
@@ -448,17 +450,24 @@ does not is not a conforming consumer.
    New record types may be added within the same version. A run whose
    output you did not fully understand has not been shown to be clean.
 4. **Treat an unknown `kind` value as indeterminate, never as clean.**
-   New finding kinds may be added within the same version.
+   The `kind` set is closed within a major release line: the
+   `doc_lint_*` `kind` values and the `run_error` `kind` values listed
+   in this document are complete. A new `kind` requires a breaking
+   release and a record-version decision, so it never arrives inside an
+   unchanged major version. A consumer must still treat an unknown
+   `kind` from a newer producer as indeterminate, never as clean.
 5. **Treat an unknown `outcome` value as indeterminate, never as
    clean.** Four values are emitted today: `finding`; and, on the
    `doc_lint_undecided` record, `configuration_dependent` for a doc set
    behind unresolved `cfg` predicates that is over budget for some
    configurations only, `unreadable_doc_payload` for a doc payload that
    is not a string literal, and `uninspected_macro_body` for a doc
-   attribute inside a macro token body. Further outcomes arrive as an
-   added `outcome` value, under `v=3`, and may carry a different key set
-   from the outcomes already defined — which is why the evidence fields
-   of `doc_lint_undecided` are read only after its `outcome`.
+   attribute inside a macro token body. That outcome set is closed
+   within a major release line; a new outcome requires a breaking
+   release and a record-version decision. A consumer must still treat an
+   unknown `outcome` from a newer producer as indeterminate, never as
+   clean, and read the evidence fields only after `outcome`, because a
+   future major version may key them differently.
 6. **Reject duplicate keys.** A record with a repeated key is malformed;
    do not keep the last value.
 7. **Reject a record carrying a key not in its schema** if you are
@@ -467,9 +476,11 @@ does not is not a conforming consumer.
    repository's own test suite — pins the exact schema so that an
    accidental field cannot ship unnoticed.
 
-Rules 3 to 5 are the mechanism by which an indeterminate result is
+Rules 3 to 5 are the mechanism by which an indeterminate result stays
 additive: nothing about reporting "this item could not be decided"
-requires a field-shape change to an existing record.
+requires a field-shape change to an existing record, and a value a
+consumer does not recognize stays indeterminate rather than collapsing
+to clean.
 
 ## The `--dry-run` diff body — human-only, never machine-parsed
 

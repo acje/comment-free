@@ -1,6 +1,6 @@
 use crate::{
     DOC_LINT_DOCTRINE_MSG, DocLintKind, DocLintOutcome, DocUndecided, RewriteCounts, RewriteMode,
-    UndecidedCause,
+    UndecidedCause, WordCount,
 };
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -9,8 +9,9 @@ use std::path::Path;
 ///
 /// Consumers reject records whose `v` exceeds the version they
 /// understand. See `docs/record-format.md` for the record grammar and
-/// the compatibility rules that let new fields, kinds, and outcomes
-/// arrive without a bump.
+/// its compatibility rules: new fields arrive without a bump, while the
+/// `kind` and `outcome` sets are closed within a major release line. A
+/// value from a newer producer stays indeterminate, never clean.
 pub const DOC_LINT_RECORD_VERSION: u32 = 3;
 /// One-line JSON templates for the `doc_lint_*` record family, for the
 /// binary's `--help` output.
@@ -170,24 +171,27 @@ pub(crate) fn open_record(kind: &str, version: u32) -> String {
 /// valid UTF-8 is reported lossily; every other byte, including tabs
 /// and newlines in a path or an item label, round-trips as a JSON
 /// escape.
+///
+/// `words` carries its own fail-closed provenance: the record writes
+/// both `words` and `fail_closed` from that one value, so no separate
+/// boolean can contradict the count.
 #[must_use]
 pub fn doc_lint_finding_record(
     kind: DocLintKind,
     path: &Path,
     line: usize,
     item: &str,
-    words: usize,
+    words: WordCount,
     budget: usize,
-    fail_closed: bool,
 ) -> String {
     let mut out = open_record("doc_lint_finding", DOC_LINT_RECORD_VERSION);
     out.push(',');
     push_text(&mut out, "outcome", DocLintOutcome::Finding.as_str());
     out.push(',');
-    push_hint_body(&mut out, kind, path, line, item, words, budget);
+    push_hint_body(&mut out, kind, path, line, item, words.count(), budget);
     out.push(',');
     push_json_string(&mut out, "fail_closed");
-    write!(out, ":{fail_closed}").expect("Write for String never fails");
+    write!(out, ":{}", words.is_fail_closed()).expect("Write for String never fails");
     out.push('}');
     out
 }
@@ -461,7 +465,7 @@ mod record_tests {
         doc_lint_finding_record, doc_lint_header_record, doc_lint_hint_record,
         doc_lint_truncated_record, rewrite_summary_record,
     };
-    use crate::{CommentFreeError, add_exact, unified_diff};
+    use crate::{CommentFreeError, WordCount, add_exact, unified_diff};
     use std::path::Path;
     fn hint(path: &str, item: &str) -> String {
         doc_lint_hint_record(DocLintKind::OverlongDoc, Path::new(path), 12, item, 100, 80)
@@ -528,20 +532,26 @@ mod record_tests {
         assert!(line.contains("fn \\u0001ctl"), "{line}");
     }
     #[test]
-    fn finding_record_carries_fail_closed_as_a_boolean() {
-        let base = |fc| {
+    fn finding_record_derives_fail_closed_from_the_count() {
+        let base = |words| {
             doc_lint_finding_record(
                 DocLintKind::OverlongDoc,
                 Path::new("src/lib.rs"),
                 3,
                 "fn f",
-                9,
+                words,
                 8,
-                fc,
             )
         };
-        assert!(base(true).contains("\"fail_closed\":true"));
-        assert!(base(false).contains("\"fail_closed\":false"));
+        let balanced = base(WordCount::Balanced(9));
+        assert!(balanced.contains("\"words\":9"), "{balanced}");
+        assert!(balanced.contains("\"fail_closed\":false"), "{balanced}");
+        let fail_closed = base(WordCount::FailClosed(9));
+        assert!(fail_closed.contains("\"words\":9"), "{fail_closed}");
+        assert!(
+            fail_closed.contains("\"fail_closed\":true"),
+            "{fail_closed}"
+        );
     }
     #[test]
     fn header_record_carries_the_doctrine_without_a_numeric_example_promise() {

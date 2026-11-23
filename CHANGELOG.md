@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Closed public enum vocabulary: `RewriteMode`, `DocLintKind`, `DocLintOutcome`,
+  `UndecidedCause` and `RunErrorKind` no longer carry `#[non_exhaustive]`.
+  New variants require a breaking release, and consumers still treat unknown
+  wire values from a newer producer as indeterminate, never clean.
+- The closed-enum guard now scans public state/outcome enums in addition to
+  error enums, with zero name exemptions.
+- Breaking API change: `doc_lint_finding_record` takes `WordCount` instead of a
+  separate `usize` and `fail_closed` bool, so contradictory fail-closed state is
+  unrepresentable. The emitted JSON key set is unchanged.
+
 ## [0.2.0] - 2026-11-23
 
 First release with a recorded changelog; the entries describe the capabilities

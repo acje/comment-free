@@ -506,9 +506,8 @@ fn run_lint(
                     &path,
                     finding.line(),
                     finding.item_label(),
-                    finding.words().count(),
+                    finding.words(),
                     finding.budget(),
-                    finding.words().is_fail_closed()
                 )
             );
             retain_hint(&mut hints, &path, finding);

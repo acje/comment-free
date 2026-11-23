@@ -124,12 +124,16 @@ cargo run --quiet --locked -- --check-doc-budget --doc-advisory-words 80 --doc-m
 ```
 
 Self-dogfood builds this checkout; `scripts/verify.sh` and CI run that exact
-native gate command, followed by the read-only rewrite preview. Installed
-consumers remain on comment-free 0.2.0 at the canonical revision below until
-publication/adoption is authorized:
+native gate command, followed by the read-only rewrite preview. Consumers
+already pinned to the legacy 0.2.0 baseline stay on that exact commit:
 ```sh
 cargo +1.100.0 install --git https://github.com/acje/comment-free --rev e45de7ef3b0fcd9a1ec299b9026b14fb5b0cf534 --locked comment-free
 ```
+
+New installs pin the `v0.2.0` release tag instead (§Consumption). The tag is
+the reproducible 0.2.0 release point; it is not equivalent to this older
+legacy commit. No crates.io publication is authorised and `publish = false`
+stands.
 
 The read-only native gate recursively scans Rust sources under `.` with the
 tool's build/hidden pruning: 80 prose words is advisory; 120 is enforced.
@@ -139,8 +143,8 @@ Native gate exits are 0 for pass, 1 for enforced breach, and 2 for
 unknown/error, including required nonmacro undecided payloads or empty scope.
 CF-0008 changes the source gate to policy records v2: macro coverage does not
 block its bounded verdict; nonmacro required uncertainty and real faults do.
-The installed revision above remains legacy; use `cargo run --locked --` from
-this canonical checkout to verify new source until publication is authorized.
+The legacy revision above remains legacy; use `cargo run --locked --` from
+this canonical checkout to verify new source.
 Policy implementation/tests/proofs belong upstream; repository checks establish
 integration only. The rewrite dry-run checks pending hygiene changes but writes
 no files; successful gate output is not a rewrite-cleanliness verdict.
@@ -169,11 +173,12 @@ compile time. Enforced mechanically via `non-exhaustive-check` from the canonica
 ### Consumption
 Installed, not vendored:
 ```sh
-cargo +1.100.0 install --git https://github.com/acje/comment-free --locked comment-free
+cargo +1.100.0 install --git https://github.com/acje/comment-free --rev v0.2.0 --locked comment-free
 ```
 `cargo install --git` ignores this repo's `rust-toolchain.toml` and
 builds with the invoking toolchain, hence the explicit `+1.100.0` matching
-this checkout's compiler pin and CI configuration.
+this checkout's compiler pin and CI configuration. `--rev v0.2.0` pins the
+tagged 0.2.0 release (see `CHANGELOG.md`) rather than the moving branch head.
 
 ### Delivery
 Use `main` as the sole local and remote branch. Do not create feature branches

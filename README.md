@@ -39,16 +39,17 @@ files.
 ## Install
 
 ```sh
-cargo +1.100.0 install --git https://github.com/acje/comment-free --locked comment-free
+cargo +1.100.0 install --git https://github.com/acje/comment-free --rev v0.2.0 --locked comment-free
 ```
 
 The `+1.100.0` is load-bearing. `cargo install --git` **ignores the source
 repository's `rust-toolchain.toml`** and builds with the *invoking*
 toolchain; the explicit `+1.100.0` matches this checkout's compiler pin
 and CI configuration rather than using an older or newer default
-toolchain. `--locked` is likewise mandatory: it
-uses the committed `Cargo.lock`, so you get the dependency graph CI
-tested.
+toolchain. `--rev v0.2.0` pins the tagged 0.2.0 release rather than the moving
+branch head, so the installed source is reproducible. `--locked` is likewise
+mandatory: it uses the committed `Cargo.lock`, so you get the dependency
+graph CI tested.
 
 To build from a local checkout instead:
 

@@ -42,6 +42,15 @@ The crate roots in [lib.rs](../../../src/lib.rs) and
 Canonical Git installation uses an explicit invoking toolchain and
 `--locked`, as documented in [AGENTS](../../../AGENTS.md#consumption).
 
+### Release posture
+
+Releases are annotated SemVer tags with a Keep-a-Changelog `CHANGELOG.md`.
+`v0.2.0` tags the revision whose Cargo.toml declares 0.2.0. `publish = false`
+stays: nothing is published to crates.io. Canonical installs pin a release tag
+with `--rev`; installing from the branch head is no longer the recommended
+path. The legacy consumer baseline at `e45de7e` remains a frozen commit
+distinct from the `v0.2.0` tag.
+
 ## Consequences
 
 + becomes easier: Local checks and CI exercise an explicitly selected toolchain and dependency graph.

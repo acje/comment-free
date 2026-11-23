@@ -7,11 +7,6 @@ pub(crate) fn ident_is(id: &syn::Ident, name: &str) -> bool {
 pub(crate) fn path_is(path: &syn::Path, name: &str) -> bool {
     path.get_ident().is_some_and(|id| ident_is(id, name))
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DocOrigin {
-    Unconditional,
-    Conditional,
-}
 /// Truth value of a `cfg` predicate under a build configuration this
 /// crate has not been told, folded as far as the predicate's own
 /// boolean constants allow.
@@ -41,13 +36,6 @@ impl CfgTruth {
             Self::Always => Self::Never,
             Self::Never => Self::Always,
             Self::Unresolved => Self::Unresolved,
-        }
-    }
-    pub(crate) const fn doc_origin(self) -> Option<DocOrigin> {
-        match self {
-            Self::Always => Some(DocOrigin::Unconditional),
-            Self::Unresolved => Some(DocOrigin::Conditional),
-            Self::Never => None,
         }
     }
 }

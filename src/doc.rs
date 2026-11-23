@@ -1,6 +1,5 @@
 use crate::cfg::{
-    CfgPredicate, CfgTruth, DocOrigin, cfg_predicate_args, fold_cfg_predicate, ident_is,
-    is_cfg_attr, path_is,
+    CfgPredicate, CfgTruth, cfg_predicate_args, fold_cfg_predicate, ident_is, is_cfg_attr, path_is,
 };
 use crate::markdown::{
     BlockScan, CodeSpanState, LineFrame, opens_or_closes_fence, scan_code_spans,
@@ -378,6 +377,11 @@ enum DocPayload {
     Text(String),
     Unreadable,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocOrigin {
+    Unconditional,
+    Conditional,
+}
 #[derive(Debug, Clone)]
 struct DocPart {
     origin: DocOrigin,
@@ -487,6 +491,13 @@ fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
     }
     collect_cfg_attr_list_doc_parts(list, CfgTruth::Always, out);
 }
+const fn doc_origin(truth: CfgTruth) -> Option<DocOrigin> {
+    match truth {
+        CfgTruth::Always => Some(DocOrigin::Unconditional),
+        CfgTruth::Unresolved => Some(DocOrigin::Conditional),
+        CfgTruth::Never => None,
+    }
+}
 fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &mut Vec<DocPart>) {
     let Ok(args) = cfg_predicate_args(list) else {
         return;
@@ -496,7 +507,7 @@ fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &
         return;
     };
     let truth = outer.and(fold_cfg_predicate(&predicate));
-    let Some(origin) = truth.doc_origin() else {
+    let Some(origin) = doc_origin(truth) else {
         return;
     };
     for arg in args {

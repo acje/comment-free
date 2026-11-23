@@ -1594,7 +1594,7 @@ impl S {
         }
     }
     #[test]
-    fn g34_lint_path_fence_tracking_matches_the_rewriter() {
+    fn g34_lint_path_fence_tracking_holds_for_long_and_indented_openers() {
         assert!(matches!(
             prose_word_count("````\n```\none two\n````\nthree"),
             WordCount::Balanced(1)

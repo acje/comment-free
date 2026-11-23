@@ -1,4 +1,3 @@
-use crate::DocLintOutcome;
 use crate::markdown::{
     BlockScan, CodeSpanState, LineFrame, opens_or_closes_fence, scan_code_spans,
 };
@@ -83,6 +82,58 @@ impl DocFinding {
     #[must_use]
     pub const fn budget(&self) -> usize {
         self.budget
+    }
+}
+/// Finding kind carried by the `kind` field of every `doc_lint_*` record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DocLintKind {
+    /// Doc-comment prose exceeded the configured word budget.
+    OverlongDoc,
+}
+impl DocLintKind {
+    /// The `kind` field value carried by emitted records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OverlongDoc => "overlong_doc",
+        }
+    }
+}
+/// What a `doc_lint_*` record asserts about the item it names.
+///
+/// A pass that cannot decide an item — an unresolved `cfg` predicate, a
+/// doc payload it cannot read — reports an explicit indeterminate
+/// outcome as an added variant rather than a record-version bump.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DocLintOutcome {
+    /// The item was inspected and violates the budget.
+    Finding,
+    /// The item's doc set depends on unresolved `cfg` predicates: it is
+    /// within budget for at least one configuration and over budget for
+    /// at least one other. Not a finding, and not clean.
+    ConfigurationDependent,
+    /// The item carries a doc payload this tool cannot read — a macro
+    /// call such as `include_str!` or `concat!` in the doc-value
+    /// position, resolved only by expansion. Not a finding, and not
+    /// clean.
+    UnreadableDocPayload,
+    /// A macro token body carries a doc attribute. What the expansion
+    /// attaches it to, and how many times, is resolved only by
+    /// expansion. Not a finding, and not clean.
+    UninspectedMacroBody,
+}
+impl DocLintOutcome {
+    /// The `outcome` field value carried by emitted records.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Finding => "finding",
+            Self::ConfigurationDependent => "configuration_dependent",
+            Self::UnreadableDocPayload => "unreadable_doc_payload",
+            Self::UninspectedMacroBody => "uninspected_macro_body",
+        }
     }
 }
 /// Why the linter could not decide an item, carrying the evidence that

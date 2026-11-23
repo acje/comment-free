@@ -19,8 +19,8 @@ use atomic::write_atomically;
 pub(crate) use doc::prose_word_count;
 pub(crate) use doc::{CfgPredicate, cfg_predicate_args};
 pub use doc::{
-    DocBudget, DocFinding, DocLintReport, DocUndecided, UndecidedCause, WordCount,
-    doc_budget_source_file, doc_lint_file,
+    DocBudget, DocFinding, DocLintKind, DocLintOutcome, DocLintReport, DocUndecided,
+    UndecidedCause, WordCount, doc_budget_source_file, doc_lint_file,
 };
 #[allow(deprecated)]
 pub use record::lint_summary_record;
@@ -65,58 +65,6 @@ impl RewriteMode {
         match self {
             Self::Write => "write",
             Self::DryRun { .. } => "dry-run",
-        }
-    }
-}
-/// Finding kind carried by the `kind` field of every `doc_lint_*` record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DocLintKind {
-    /// Doc-comment prose exceeded the configured word budget.
-    OverlongDoc,
-}
-impl DocLintKind {
-    /// The `kind` field value carried by emitted records.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::OverlongDoc => "overlong_doc",
-        }
-    }
-}
-/// What a `doc_lint_*` record asserts about the item it names.
-///
-/// A pass that cannot decide an item — an unresolved `cfg` predicate, a
-/// doc payload it cannot read — reports an explicit indeterminate
-/// outcome as an added variant rather than a record-version bump.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DocLintOutcome {
-    /// The item was inspected and violates the budget.
-    Finding,
-    /// The item's doc set depends on unresolved `cfg` predicates: it is
-    /// within budget for at least one configuration and over budget for
-    /// at least one other. Not a finding, and not clean.
-    ConfigurationDependent,
-    /// The item carries a doc payload this tool cannot read — a macro
-    /// call such as `include_str!` or `concat!` in the doc-value
-    /// position, resolved only by expansion. Not a finding, and not
-    /// clean.
-    UnreadableDocPayload,
-    /// A macro token body carries a doc attribute. What the expansion
-    /// attaches it to, and how many times, is resolved only by
-    /// expansion. Not a finding, and not clean.
-    UninspectedMacroBody,
-}
-impl DocLintOutcome {
-    /// The `outcome` field value carried by emitted records.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Finding => "finding",
-            Self::ConfigurationDependent => "configuration_dependent",
-            Self::UnreadableDocPayload => "unreadable_doc_payload",
-            Self::UninspectedMacroBody => "uninspected_macro_body",
         }
     }
 }

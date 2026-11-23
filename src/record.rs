@@ -2,6 +2,7 @@ use crate::{
     DOC_LINT_DOCTRINE_MSG, DocLintKind, DocLintOutcome, DocUndecided, RewriteCounts, RewriteMode,
     UndecidedCause,
 };
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 /// Version carried by the `v` field of every `doc_lint_*` record.
@@ -56,6 +57,73 @@ pub const DIAGNOSTIC_RECORD_GRAMMAR: &str = "\
 {\"record\":\"rewrite_file\",\"v\":<N>,\"mode\":<MODE>,\"path\":<PATH>}
 {\"record\":\"strip_summary\",\"v\":<N>,\"mode\":<MODE>,\"rewritten\":<U32>,\"unchanged\":<U32>,\"errors\":<U32>}
 {\"record\":\"lint_summary\",\"v\":<N>,\"root\":<PATH>,\"scope\":<SCOPE>,\"max_warning_files\":<STRING>,\"files\":<U32>,\"errors\":<U32>,\"warning_files\":<U32>,\"warning_files_shown\":<U32>,\"warning_files_hidden\":<U32>,\"findings\":<U32>,\"findings_shown\":<U32>,\"findings_hidden\":<U32>,\"undecided\":<U32>,\"undecided_shown\":<U32>,\"undecided_hidden\":<U32>,\"overlong_doc_findings\":<U32>,\"overlong_doc_undecided\":<U32>,\"over_budget\":<U32>,\"configuration_dependent\":<U32>,\"unreadable_doc_payload\":<U32>,\"uninspected_macro_body\":<U32>}";
+/// Counts a `lint_summary` record reports, with the run metadata it was
+/// selected under.
+pub(crate) struct LintSummaryPayload<'a> {
+    pub(crate) root: &'a Path,
+    pub(crate) scope: &'a str,
+    pub(crate) limit: &'a str,
+    pub(crate) files: u32,
+    pub(crate) errors: u32,
+    pub(crate) warning_files: u32,
+    pub(crate) warning_files_shown: u32,
+    pub(crate) findings: u32,
+    pub(crate) findings_shown: u32,
+    pub(crate) undecided: u32,
+    pub(crate) undecided_shown: u32,
+    pub(crate) outcomes: &'a BTreeMap<&'static str, u32>,
+}
+/// The v3 `lint_summary` record, keyed in the order
+/// [`DIAGNOSTIC_RECORD_GRAMMAR`] declares.
+#[must_use]
+pub(crate) fn lint_summary_v3_record(payload: &LintSummaryPayload<'_>) -> String {
+    let mut out = open_record("lint_summary", DIAGNOSTIC_RECORD_VERSION);
+    out.push(',');
+    push_text(&mut out, "root", &payload.root.display().to_string());
+    out.push(',');
+    push_text(&mut out, "scope", payload.scope);
+    out.push(',');
+    push_text(&mut out, "max_warning_files", payload.limit);
+    for (key, value) in [
+        ("files", payload.files),
+        ("errors", payload.errors),
+        ("warning_files", payload.warning_files),
+        ("warning_files_shown", payload.warning_files_shown),
+        (
+            "warning_files_hidden",
+            payload.warning_files - payload.warning_files_shown,
+        ),
+        ("findings", payload.findings),
+        ("findings_shown", payload.findings_shown),
+        ("findings_hidden", payload.findings - payload.findings_shown),
+        ("undecided", payload.undecided),
+        ("undecided_shown", payload.undecided_shown),
+        (
+            "undecided_hidden",
+            payload.undecided - payload.undecided_shown,
+        ),
+        ("overlong_doc_findings", payload.findings),
+        ("overlong_doc_undecided", payload.undecided),
+    ] {
+        out.push(',');
+        push_number(&mut out, key, value);
+    }
+    for name in [
+        "over_budget",
+        "configuration_dependent",
+        "unreadable_doc_payload",
+        "uninspected_macro_body",
+    ] {
+        out.push(',');
+        push_number(
+            &mut out,
+            name,
+            payload.outcomes.get(name).copied().unwrap_or(0),
+        );
+    }
+    out.push('}');
+    out
+}
 
 fn push_json_string(out: &mut String, value: &str) {
     out.push('"');

@@ -29,7 +29,7 @@ pub use record::{
     doc_lint_truncated_record, doc_lint_undecided_record, rewrite_file_record,
     rewrite_summary_record, run_error_record, strip_summary_record,
 };
-use record::{open_record, push_number, push_text};
+use record::{LintSummaryPayload, lint_summary_v3_record};
 pub use splice::rewrite_rustdoc_link_idioms;
 use splice::{apply_splices, collect_doc_splices};
 pub(crate) use strip::unified_diff;
@@ -468,51 +468,21 @@ impl LintTotals {
     /// ```
     #[must_use]
     pub fn record(&self, root: &Path, scope: ReportScope, limit: WarningLimit) -> String {
-        let mut out = open_record("lint_summary", DIAGNOSTIC_RECORD_VERSION);
-        for (key, value) in [
-            ("root", root.display().to_string()),
-            ("scope", scope.as_str().to_owned()),
-            ("max_warning_files", limit.to_string()),
-        ] {
-            out.push(',');
-            push_text(&mut out, key, &value);
-        }
-        for (key, value) in [
-            ("files", self.files),
-            ("errors", self.errors),
-            ("warning_files", self.warning_files),
-            ("warning_files_shown", self.warning_files_shown),
-            (
-                "warning_files_hidden",
-                self.warning_files - self.warning_files_shown,
-            ),
-            ("findings", self.findings),
-            ("findings_shown", self.findings_shown),
-            ("findings_hidden", self.findings - self.findings_shown),
-            ("undecided", self.undecided),
-            ("undecided_shown", self.undecided_shown),
-            ("undecided_hidden", self.undecided - self.undecided_shown),
-            ("overlong_doc_findings", self.findings),
-            ("overlong_doc_undecided", self.undecided),
-        ] {
-            out.push(',');
-            push_number(&mut out, key, value);
-        }
-        for name in [
-            "over_budget",
-            "configuration_dependent",
-            "unreadable_doc_payload",
-            "uninspected_macro_body",
-        ] {
-            out.push(',');
-            push_number(
-                &mut out,
-                name,
-                self.outcomes.get(name).copied().unwrap_or(0),
-            );
-        }
-        out.push('}');
-        out
+        let limit = limit.to_string();
+        lint_summary_v3_record(&LintSummaryPayload {
+            root,
+            scope: scope.as_str(),
+            limit: &limit,
+            files: self.files,
+            errors: self.errors,
+            warning_files: self.warning_files,
+            warning_files_shown: self.warning_files_shown,
+            findings: self.findings,
+            findings_shown: self.findings_shown,
+            undecided: self.undecided,
+            undecided_shown: self.undecided_shown,
+            outcomes: &self.outcomes,
+        })
     }
 }
 

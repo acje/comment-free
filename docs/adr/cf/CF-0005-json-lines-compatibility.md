@@ -16,7 +16,7 @@ Paths and item labels can contain characters that forge boundaries in
 unescaped tab-separated output. JSON Lines provides structured records
 while keeping dry-run diffs readable. The authoritative schema remains
 [record-format.md](../../record-format.md), not this record or the help
-templates. [Record emitters](../../../src/lib.rs) include
+templates. [Record emitters](../../../src/record.rs) include
 `push_json_string`, `doc_lint_undecided_record`, and the three record-family
 version constants; [CLI output](../../../src/main.rs) supplies line endings.
 
@@ -49,7 +49,7 @@ escaping does not create byte-exact filesystem path identity.
 + becomes easier: Unusual UTF-8 paths round-trip without forging record boundaries.
 − becomes harder: Consumers must preserve uncertainty when extensions are not understood.
 risks/migration: Consumers must understand v3 before reading bounded CLI output.
-Existing [tests](../../../tests/end_to_end.rs) cover
+Existing [tests](../../../tests/records.rs) cover
 `record_survives_a_path_containing_a_tab_and_a_newline`,
 `every_emitted_record_line_parses_strictly`,
 `parser_rejects_a_duplicate_field`, and

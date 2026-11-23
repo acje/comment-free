@@ -18,8 +18,8 @@ tool uses Rust syntax for doc-link edits and lexer tokens for stripping.
 This record documents that boundary, not a new documentation policy.
 Sources: [README](../../../README.md#comment-free),
 [AGENTS](../../../AGENTS.md#what-this-repo-is), and
-[implementation](../../../src/lib.rs) (`process_file`,
-`strip_line_comments_with_counts`).
+[implementation](../../../src/lib.rs) (`process_file`),
+[implementation](../../../src/strip.rs) (`strip_line_comments_with_counts`).
 
 ## Decision
 
@@ -42,7 +42,7 @@ reported in rewrite mode but never rewritten.
 + becomes easier: Comment classification follows Rust tokens, not prose conventions.
 − becomes harder: Non-doc rationale has no marker-based exemption from removal.
 risks/migration: Acceptance of this record makes no behavior change. The
-existing regression tests in [end_to_end.rs](../../../tests/end_to_end.rs)
+existing regression tests in [strip_rewrite.rs](../../../tests/strip_rewrite.rs)
 include `safety_line_comment_is_stripped`, `safety_block_comment_is_stripped`,
 and `string_literal_with_double_slash_marker_text_round_trips_byte_identical`.
 Doc preservation does not imply every doc syntax supports link rewriting.

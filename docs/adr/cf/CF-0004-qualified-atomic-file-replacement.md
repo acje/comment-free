@@ -16,8 +16,8 @@ Truncating a destination before a rewrite finishes exposes partial files.
 The existing implementation instead replaces one pathname through a sibling
 temporary file and checks for intervening edits. Sources:
 [write guarantees and limits](../../../README.md#how---rewrite-writes-and-what-it-does-not-promise)
-and [implementation](../../../src/lib.rs) (`write_atomically`,
-`TempFileGuard`, `process_file`). This record retains those qualifications
+and [implementation](../../../src/atomic.rs) (`write_atomically`,
+`TempFileGuard`), [implementation](../../../src/lib.rs) (`process_file`). This record retains those qualifications
 rather than promising transactional concurrent editing or power-loss durability.
 
 ## Decision
@@ -43,7 +43,7 @@ and signals can leave residue. Windows semantics are not claimed or tested.
 + becomes easier: A successful replacement avoids exposing a partially written destination.
 − becomes harder: Callers cannot rely on hard-link alias updates or exclusion of concurrent writers.
 risks/migration: No stronger durability or concurrency guarantee is accepted.
-Existing [unit tests](../../../src/lib.rs) cover
+Existing [unit tests](../../../src/atomic.rs) cover
 `destination_changed_since_read_is_a_conflict_and_leaves_bytes_untouched`,
 `rewrite_preserves_the_destination_file_mode`,
 `a_symlink_destination_is_refused_and_its_target_is_left_alone`, and

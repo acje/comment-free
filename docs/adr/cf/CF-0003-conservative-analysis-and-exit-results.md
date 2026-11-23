@@ -57,7 +57,7 @@ risks/migration: Clean is limited to the syntactic coverage described in the
 [README](../../../README.md#known-limitation-doc-attributes-inside-macro-bodies).
 Procedural macros synthesizing docs without visible doc tokens remain
 undetected. Successful write mode does not establish lint cleanliness.
-Existing [tests](../../../tests/end_to_end.rs) include
+Existing [tests](../../../tests/lint_budget.rs) include
 `mutually_exclusive_cfg_docs_are_undecided_not_a_finding`,
 `a_raw_spelled_doc_payload_is_not_reported_clean`, and
 `a_raw_spelled_doc_inside_a_macro_body_is_not_reported_clean`.

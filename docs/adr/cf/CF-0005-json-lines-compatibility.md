@@ -8,7 +8,7 @@ Crates: comment-free
 
 ## Related
 
-References: CF-0001, CF-0003
+References: CF-0003, CF-0001
 
 ## Context
 

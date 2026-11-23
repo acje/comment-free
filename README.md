@@ -319,7 +319,9 @@ Validation on 2026-09-06 used installed canonical `adr-fmt` 0.3.0 at revision
 Lint exited 0 with four L015 advisories for CF-0003 through CF-0006: their
 first reference is the root while later references include same-domain
 non-root records. Reference order and parentage are preserved; the five
-former L012 Draft-parent advisories are gone.
+former L012 Draft-parent advisories are gone. A later pass promoted the
+same-domain first reference in CF-0003 through CF-0006, so `adr-fmt --lint`
+now reports zero L015 advisories.
 `--context` emits rules only from Accepted, non-stale ADRs; this run
 exited 0 and emitted 17 tagged rules for `comment-free`. `--tree CF` exited 0
 and listed the six connected Accepted records without a hand-maintained index.

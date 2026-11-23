@@ -1527,7 +1527,7 @@ pub enum E { #[doc = " w01 w02 w03 w04 w05"] One, #[doc =
         assert_eq!(findings[0].item_label, "extern crate alloc");
     }
     #[test]
-    fn every_documented_item_form_has_its_label() {
+    fn every_named_item_form_has_its_label() {
         let f = file(
             r"
 /// w1 w2
@@ -1559,6 +1559,13 @@ impl S {
     fn im() {}
     /// w1 w2
     const IC: u32 = 0;
+}
+/// w1 w2
+impl T for S {
+    /// w1 w2
+    fn tf() {}
+    /// w1 w2
+    const TC: u32 = 0;
     /// w1 w2
     type TT = u32;
 }

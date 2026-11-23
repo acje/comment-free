@@ -431,11 +431,7 @@ fn strip_reporting_a_typed_failure_exits_five_and_leaves_the_file_untouched() {
         "// drop me\nfn f( {\n",
         "a declined file must keep its own bytes"
     );
-    let mut residue: Vec<String> = fs::read_dir(td.path().join("src"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    residue.sort();
+    let residue = src_entry_names(td.path());
     assert_eq!(residue, vec!["broken.rs".to_string()]);
 }
 
@@ -669,25 +665,25 @@ fn auto_trait_policy_markers_stripped_when_surrounding_macro_is_absent() {
     );
 }
 
+fn src_entry_names(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(root.join("src"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn write_mode_leaves_only_the_target_file_in_the_directory() {
     let td = tempfile::tempdir().unwrap();
     write(td.path(), "a.rs", "// drop me\nfn f() {}\n");
     run(td.path());
     assert_eq!(read(td.path(), "a.rs"), "fn f() {}\n");
-    let mut names: Vec<String> = fs::read_dir(td.path().join("src"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
     assert_eq!(
-        names,
+        src_entry_names(td.path()),
         vec!["a.rs".to_string()],
         "the rewrite left residue beside its target"
-    );
-    assert!(
-        names.iter().all(|name| !name.contains("comment-free-tmp")),
-        "a sibling temp file survived the atomic write: {names:?}"
     );
 }
 
@@ -703,12 +699,7 @@ fn write_mode_preserves_the_destination_file_mode() {
     assert_eq!(read(td.path(), "a.rs"), "fn f() {}\n");
     let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o640, "the rewrite changed the file mode to {mode:o}");
-    let mut names: Vec<String> = fs::read_dir(td.path().join("src"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["a.rs".to_string()]);
+    assert_eq!(src_entry_names(td.path()), vec!["a.rs".to_string()]);
 }
 
 #[cfg(unix)]
@@ -769,11 +760,7 @@ fn a_failed_rename_after_temp_creation_leaves_no_residue() {
         "a failed rename must surface as a typed run error:\n{stderr}"
     );
     one_error(&stderr, "io");
-    let mut names: Vec<String> = fs::read_dir(td.path().join("src"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
+    let names = src_entry_names(td.path());
     assert_eq!(
         names,
         vec!["a.rs".to_string()],

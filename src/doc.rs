@@ -1527,6 +1527,73 @@ pub enum E { #[doc = " w01 w02 w03 w04 w05"] One, #[doc =
         assert_eq!(findings[0].item_label, "extern crate alloc");
     }
     #[test]
+    fn every_documented_item_form_has_its_label() {
+        let f = file(
+            r"
+/// w1 w2
+struct S;
+/// w1 w2
+enum E { A }
+/// w1 w2
+trait T {
+    /// w1 w2
+    fn tf();
+    /// w1 w2
+    const TC: u32;
+    /// w1 w2
+    type TT;
+}
+/// w1 w2
+mod m {}
+/// w1 w2
+const C: u32 = 0;
+/// w1 w2
+static ST: u32 = 0;
+/// w1 w2
+type Ty = u32;
+/// w1 w2
+union U { a: u32 }
+/// w1 w2
+impl S {
+    /// w1 w2
+    fn im() {}
+    /// w1 w2
+    const IC: u32 = 0;
+    /// w1 w2
+    type TT = u32;
+}
+        ",
+        );
+        let found = report(&f, 1);
+        let labels: Vec<&str> = found
+            .findings()
+            .iter()
+            .map(super::DocFinding::item_label)
+            .collect();
+        for expected in [
+            "struct S",
+            "enum E",
+            "trait T",
+            "impl",
+            "mod m",
+            "const C",
+            "static ST",
+            "type Ty",
+            "union U",
+            "trait fn tf",
+            "trait const TC",
+            "trait type TT",
+            "impl fn im",
+            "impl const IC",
+            "impl type TT",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "documented item form {expected:?} has no label; labels seen: {labels:?}"
+            );
+        }
+    }
+    #[test]
     fn g34_lint_path_fence_tracking_matches_the_rewriter() {
         assert!(matches!(
             prose_word_count("````\n```\none two\n````\nthree"),

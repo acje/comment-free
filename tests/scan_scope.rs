@@ -915,3 +915,79 @@ fn doc_scan_counts_unreadable_directory_as_error_and_exits_5() {
         "both Rust and documentation walks report the inaccessible directory:\n{stderr}"
     );
 }
+
+#[test]
+fn doc_warn_covers_extensions_and_bare_stems() {
+    let td = tempfile::tempdir().unwrap();
+    for name in [
+        "README",
+        "LICENCE",
+        "NOTICE",
+        "COPYING",
+        "CHANGELOG",
+        "AUTHORS",
+        "CONTRIBUTORS",
+    ] {
+        fs::write(td.path().join(name), "text\n").expect("write bare stem");
+    }
+    for name in [
+        "notes.txt",
+        "guide.rst",
+        "manual.adoc",
+        "book.asciidoc",
+        "doc.md",
+        "doc2.markdown",
+    ] {
+        fs::write(td.path().join(name), "text\n").expect("write extension");
+    }
+    fs::create_dir_all(td.path().join("docs")).expect("mkdir docs");
+    fs::write(td.path().join("docs").join("asset.bin"), "text\n").expect("write docs asset");
+    fs::write(td.path().join("data.json"), "{}\n").expect("write non-doc data");
+    write(td.path(), "a.rs", "fn f() {}\n");
+    let out = Command::new(bin())
+        .arg("--rewrite")
+        .arg("--dry-run")
+        .arg(".")
+        .current_dir(td.path())
+        .output()
+        .expect("failed to spawn comment-free");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the fixture holds no pending rewrite:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut warned: Vec<String> = records_named(&stderr, "doc_file_warning")
+        .iter()
+        .map(|record| {
+            Path::new(record.text("path"))
+                .file_name()
+                .expect("a warned path names a file")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    warned.sort();
+    let mut expected = vec![
+        "README",
+        "LICENCE",
+        "NOTICE",
+        "COPYING",
+        "CHANGELOG",
+        "AUTHORS",
+        "CONTRIBUTORS",
+        "notes.txt",
+        "guide.rst",
+        "manual.adoc",
+        "book.asciidoc",
+        "doc.md",
+        "doc2.markdown",
+        "asset.bin",
+    ];
+    expected.sort_unstable();
+    assert_eq!(
+        warned, expected,
+        "the doc scan missed or over-claimed a documented form:\n{stderr}"
+    );
+}

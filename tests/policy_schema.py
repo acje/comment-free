@@ -36,89 +36,115 @@ def validate_exit(record, code):
 def validate(record):
     assert type(record) is dict
     if record.get("record") == "run_error":
-        keys(record, "record v kind path message")
-        assert type(record["v"]) is int and record["v"] == 3
-        assert record["kind"] in ("walk", "io", "parse", "conflict")
-        assert all(type(record[k]) is str for k in ("path", "message"))
+        validate_run_error(record)
         return
     assert type(record["version"]) is int and record["version"] == 2
     if record["kind"] == "policy_summary":
-        keys(record, "kind version coverage next_step root scope files errors max_warning_files verdict reasons advisory enforced")
-        assert record["coverage"] == "bounded-source"
-        assert type(record["next_step"]) is str and record["next_step"]
-        assert record["verdict"] in ("pass", "fail", "unknown")
-        assert record["scope"] in ("file", "recursive-directory")
-        assert type(record["root"]) is str
-        for name in ("files", "errors"):
-            unsigned(record[name])
-        limit = record["max_warning_files"]
-        assert type(limit) is str
-        assert limit == "unlimited" or (limit.isascii() and limit.isdecimal() and str(int(limit)) == limit and int(limit) <= usize_max)
-        assert type(record["reasons"]) is list and all(type(r) is str for r in record["reasons"])
-        assert len(set(record["reasons"])) == len(record["reasons"])
-        order = "empty_scope processing_error advisory_undecided enforced_undecided enforced_violation counter_overflow output_error".split()
-        assert record["reasons"] == [r for r in order if r in record["reasons"]]
-        for threshold in ("advisory", "enforced"):
-            budget = record[threshold]
-            assert type(budget) is dict
-            unsigned(budget["max_words"], usize_max)
-            expected = ["max_words", "over_budget"]
-            for name in families:
-                expected += [name, name + "_shown", name + "_hidden"]
-                assert budget[name] == budget[name + "_shown"] + budget[name + "_hidden"]
-            keys(budget, " ".join(expected))
-            assert all(type(v) is int and v >= 0 for v in budget.values())
-            assert all(v <= 2**32 - 1 for k, v in budget.items() if k != "max_words")
-            assert budget["over_budget"] == budget["findings"]
-            for suffix in ("", "_shown", "_hidden"):
-                assert budget["undecided" + suffix] == sum(budget[c + suffix] for c in causes)
-            assert budget["warning_files"] <= record["files"]
-            if limit != "unlimited":
-                assert budget["warning_files_shown"] <= int(limit)
-            if limit == "0":
-                assert all(budget[name + "_shown"] == 0 for name in families)
-        assert record["advisory"]["max_words"] <= record["enforced"]["max_words"]
-        expected_reasons = [name for name, applies in (
-            ("empty_scope", record["files"] == 0),
-            ("processing_error", record["errors"] > 0),
-            ("advisory_undecided", record["advisory"]["undecided"] > record["advisory"]["uninspected_macro_body"]),
-            ("enforced_undecided", record["enforced"]["undecided"] > record["enforced"]["uninspected_macro_body"]),
-            ("enforced_violation", record["enforced"]["findings"] > 0),
-        ) if applies]
-        assert record["reasons"] == expected_reasons
-        unknown = any(r != "enforced_violation" for r in expected_reasons)
-        assert record["verdict"] == ("unknown" if unknown else "fail" if expected_reasons else "pass")
+        validate_policy_summary(record)
     else:
-        assert record["kind"] == "policy_detail"
-        assert record["threshold"] in ("advisory", "enforced")
-        base = "kind version threshold event"
-        event = record["event"]
-        if event == "doc_lint_header":
-            extra = "doctrine"
-        elif event == "doc_lint_truncated":
-            extra = "remaining"
-        else:
-            extra = "outcome path line item budget"
-            if event in ("doc_lint_finding", "doc_lint_hint"):
-                assert record["outcome"] == "finding"
-                extra += " words"
-                if event == "doc_lint_finding":
-                    extra += " fail_closed"
-            else:
-                assert event in ("doc_lint_undecided", "coverage_limitation")
-                assert (event == "coverage_limitation") == (record["outcome"] == "uninspected_macro_body")
-                assert record["outcome"] in causes
-                if record["outcome"] == "configuration_dependent":
-                    extra += " words words_all_cfgs fail_closed"
-        keys(record, base + " " + extra)
-        for name in ("line", "budget", "words", "words_all_cfgs", "remaining"):
-            if name in record:
-                unsigned(record[name], 2**32 - 1 if name == "remaining" else usize_max)
-        for name in ("path", "item", "doctrine", "outcome"):
-            if name in record:
-                assert type(record[name]) is str
-        if "fail_closed" in record:
-            assert type(record["fail_closed"]) is bool
+        validate_policy_detail(record)
+
+
+def validate_run_error(record):
+    keys(record, "record v kind path message")
+    assert type(record["v"]) is int and record["v"] == 3
+    assert record["kind"] in ("walk", "io", "parse", "conflict")
+    assert all(type(record[k]) is str for k in ("path", "message"))
+
+
+def summary_limit(record):
+    limit = record["max_warning_files"]
+    assert type(limit) is str
+    assert limit == "unlimited" or (limit.isascii() and limit.isdecimal() and str(int(limit)) == limit and int(limit) <= usize_max)
+    return limit
+
+
+def validate_summary_reasons(record):
+    assert type(record["reasons"]) is list and all(type(r) is str for r in record["reasons"])
+    assert len(set(record["reasons"])) == len(record["reasons"])
+    order = "empty_scope processing_error advisory_undecided enforced_undecided enforced_violation counter_overflow output_error".split()
+    assert record["reasons"] == [r for r in order if r in record["reasons"]]
+
+
+def validate_budget(budget, limit, files):
+    assert type(budget) is dict
+    unsigned(budget["max_words"], usize_max)
+    expected = ["max_words", "over_budget"]
+    for name in families:
+        expected += [name, name + "_shown", name + "_hidden"]
+        assert budget[name] == budget[name + "_shown"] + budget[name + "_hidden"]
+    keys(budget, " ".join(expected))
+    assert all(type(v) is int and v >= 0 for v in budget.values())
+    assert all(v <= 2**32 - 1 for k, v in budget.items() if k != "max_words")
+    assert budget["over_budget"] == budget["findings"]
+    for suffix in ("", "_shown", "_hidden"):
+        assert budget["undecided" + suffix] == sum(budget[c + suffix] for c in causes)
+    assert budget["warning_files"] <= files
+    if limit != "unlimited":
+        assert budget["warning_files_shown"] <= int(limit)
+    if limit == "0":
+        assert all(budget[name + "_shown"] == 0 for name in families)
+
+
+def validate_policy_summary(record):
+    keys(record, "kind version coverage next_step root scope files errors max_warning_files verdict reasons advisory enforced")
+    assert record["coverage"] == "bounded-source"
+    assert type(record["next_step"]) is str and record["next_step"]
+    assert record["verdict"] in ("pass", "fail", "unknown")
+    assert record["scope"] in ("file", "recursive-directory")
+    assert type(record["root"]) is str
+    for name in ("files", "errors"):
+        unsigned(record[name])
+    limit = summary_limit(record)
+    validate_summary_reasons(record)
+    for threshold in ("advisory", "enforced"):
+        validate_budget(record[threshold], limit, record["files"])
+    assert record["advisory"]["max_words"] <= record["enforced"]["max_words"]
+    expected_reasons = [name for name, applies in (
+        ("empty_scope", record["files"] == 0),
+        ("processing_error", record["errors"] > 0),
+        ("advisory_undecided", record["advisory"]["undecided"] > record["advisory"]["uninspected_macro_body"]),
+        ("enforced_undecided", record["enforced"]["undecided"] > record["enforced"]["uninspected_macro_body"]),
+        ("enforced_violation", record["enforced"]["findings"] > 0),
+    ) if applies]
+    assert record["reasons"] == expected_reasons
+    unknown = any(r != "enforced_violation" for r in expected_reasons)
+    assert record["verdict"] == ("unknown" if unknown else "fail" if expected_reasons else "pass")
+
+
+def detail_extra(event, record):
+    if event == "doc_lint_header":
+        return "doctrine"
+    if event == "doc_lint_truncated":
+        return "remaining"
+    extra = "outcome path line item budget"
+    if event in ("doc_lint_finding", "doc_lint_hint"):
+        assert record["outcome"] == "finding"
+        extra += " words"
+        if event == "doc_lint_finding":
+            extra += " fail_closed"
+    else:
+        assert event in ("doc_lint_undecided", "coverage_limitation")
+        assert (event == "coverage_limitation") == (record["outcome"] == "uninspected_macro_body")
+        assert record["outcome"] in causes
+        if record["outcome"] == "configuration_dependent":
+            extra += " words words_all_cfgs fail_closed"
+    return extra
+
+
+def validate_policy_detail(record):
+    assert record["kind"] == "policy_detail"
+    assert record["threshold"] in ("advisory", "enforced")
+    event = record["event"]
+    keys(record, "kind version threshold event " + detail_extra(event, record))
+    for name in ("line", "budget", "words", "words_all_cfgs", "remaining"):
+        if name in record:
+            unsigned(record[name], 2**32 - 1 if name == "remaining" else usize_max)
+    for name in ("path", "item", "doctrine", "outcome"):
+        if name in record:
+            assert type(record[name]) is str
+    if "fail_closed" in record:
+        assert type(record["fail_closed"]) is bool
 
 
 def records(data, policy=True):

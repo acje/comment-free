@@ -26,7 +26,9 @@ pub struct DocBudget {
 /// Result of counting prose words in a doc comment.
 ///
 /// Not `#[non_exhaustive]`: an undecidable lint result is a
-/// [`DocLintOutcome`] variant, not a third count.
+/// [`DocLintOutcome`] variant, not a third count. It is also the input
+/// alphabet of the finding record, which derives both `words` and
+/// `fail_closed` from the one value.
 #[derive(Debug, Clone, Copy)]
 pub enum WordCount {
     /// Fence state was balanced; `count` excludes fenced code.

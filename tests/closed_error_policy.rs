@@ -432,21 +432,21 @@ fn negative_compliant_closed_error_enum() {
 #[test]
 fn negative_repr_dto() {
     assert!(!flags(
-        "#[repr(u8)] #[derive(Debug)] pub enum CollectionFailureReason { A = 0 }"
+        "#[non_exhaustive] #[repr(u8)] #[derive(Debug)] pub enum CollectionFailureReason { A = 0 }"
     ));
 }
 
 #[test]
 fn negative_serde_dto() {
     assert!(!flags(
-        "#[derive(Serialize, Deserialize)] pub enum SchedulerEvent { A }"
+        "#[non_exhaustive] #[derive(Serialize, Deserialize)] pub enum SchedulerEvent { A }"
     ));
 }
 
 #[test]
 fn negative_serde_repr_dto() {
     assert!(!flags(
-        "#[repr(u8)] #[derive(Serialize, Deserialize)] pub enum ExclusionReason { A = 0 }"
+        "#[non_exhaustive] #[repr(u8)] #[derive(Serialize, Deserialize)] pub enum ExclusionReason { A = 0 }"
     ));
 }
 
@@ -460,7 +460,7 @@ fn negative_non_pub_error_enum() {
 #[test]
 fn manual_std_error_impl_flags_non_exhaustive_pub_enum() {
     assert!(flags_with_manual(
-        "#[non_exhaustive] pub enum ManualError { A }",
+        "#[non_exhaustive] #[repr(u8)] pub enum ManualError { A }",
         "impl std::error::Error for ManualError {}"
     ));
 }
@@ -468,7 +468,7 @@ fn manual_std_error_impl_flags_non_exhaustive_pub_enum() {
 #[test]
 fn manual_core_error_impl_flags_non_exhaustive_pub_enum() {
     assert!(flags_with_manual(
-        "#[non_exhaustive] pub enum CoreError { A }",
+        "#[non_exhaustive] #[repr(u8)] pub enum CoreError { A }",
         "impl core::error::Error for CoreError {}"
     ));
 }
@@ -476,7 +476,7 @@ fn manual_core_error_impl_flags_non_exhaustive_pub_enum() {
 #[test]
 fn manual_bare_error_impl_flags_non_exhaustive_pub_enum() {
     assert!(flags_with_manual(
-        "#[non_exhaustive] pub enum ImportedError { A }",
+        "#[non_exhaustive] #[repr(u8)] pub enum ImportedError { A }",
         "impl Error for ImportedError {}"
     ));
 }
@@ -515,6 +515,13 @@ fn non_exhaustive_state_enum_is_flagged() {
 fn non_exhaustive_serde_dto_is_silent() {
     assert!(!flags(
         "#[derive(Serialize, Deserialize)] #[non_exhaustive] pub enum WireEvent { A }"
+    ));
+}
+
+#[test]
+fn non_exhaustive_derive_error_dto_is_flagged() {
+    assert!(flags(
+        "#[repr(u8)] #[derive(Debug, thiserror::Error)] #[non_exhaustive] pub enum WireErr { A }"
     ));
 }
 

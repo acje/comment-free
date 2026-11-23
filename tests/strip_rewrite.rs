@@ -668,3 +668,120 @@ fn auto_trait_policy_markers_stripped_when_surrounding_macro_is_absent() {
         "surrounding code must survive:\n{out}"
     );
 }
+
+#[test]
+fn write_mode_leaves_only_the_target_file_in_the_directory() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a.rs", "// drop me\nfn f() {}\n");
+    run(td.path());
+    assert_eq!(read(td.path(), "a.rs"), "fn f() {}\n");
+    let mut names: Vec<String> = fs::read_dir(td.path().join("src"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["a.rs".to_string()],
+        "the rewrite left residue beside its target"
+    );
+    assert!(
+        names.iter().all(|name| !name.contains("comment-free-tmp")),
+        "a sibling temp file survived the atomic write: {names:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn write_mode_preserves_the_destination_file_mode() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a.rs", "// drop me\nfn f() {}\n");
+    let target = td.path().join("src").join("a.rs");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
+    run(td.path());
+    assert_eq!(read(td.path(), "a.rs"), "fn f() {}\n");
+    let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640, "the rewrite changed the file mode to {mode:o}");
+    let mut names: Vec<String> = fs::read_dir(td.path().join("src"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["a.rs".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn write_mode_hard_link_alias_keeps_original_contents() {
+    use std::os::unix::fs::MetadataExt as _;
+    let td = tempfile::tempdir().unwrap();
+    let root = td.path().join("root");
+    write(&root, "a.rs", "// drop me\nfn f() {}\n");
+    let target = root.join("src").join("a.rs");
+    let alias = td.path().join("alias.rs");
+    fs::hard_link(&target, &alias).unwrap();
+    let original_inode = fs::metadata(&target).unwrap().ino();
+    run(&root);
+    assert_eq!(
+        fs::read_to_string(&target).unwrap(),
+        "fn f() {}\n",
+        "the target must be rewritten in place"
+    );
+    assert_eq!(
+        fs::read(&alias).unwrap(),
+        b"// drop me\nfn f() {}\n",
+        "the rewrite wrote through the hard link instead of replacing its target"
+    );
+    assert_eq!(
+        fs::metadata(&alias).unwrap().ino(),
+        original_inode,
+        "the alias must keep the inode it shared with the original file"
+    );
+    assert_ne!(
+        fs::metadata(&target).unwrap().ino(),
+        original_inode,
+        "an atomic replacement must install a new inode at the target path"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_rename_after_temp_creation_leaves_no_residue() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a.rs", "// drop me\nfn f() {}\n");
+    let target = td.path().join("src").join("a.rs");
+    let chflags = |flag: &str| {
+        let status = Command::new("chflags")
+            .arg(flag)
+            .arg(&target)
+            .status()
+            .expect("chflags must be available on macOS");
+        assert!(status.success(), "chflags {flag} failed");
+    };
+    chflags("uchg");
+    let out = run(td.path());
+    chflags("nouchg");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(5),
+        "a failed rename must surface as a typed run error:\n{stderr}"
+    );
+    one_error(&stderr, "io");
+    let mut names: Vec<String> = fs::read_dir(td.path().join("src"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["a.rs".to_string()],
+        "a failed rename left the temp file behind: {names:?}"
+    );
+    assert_eq!(
+        read(td.path(), "a.rs"),
+        "// drop me\nfn f() {}\n",
+        "a failed rename must leave the destination untouched"
+    );
+}

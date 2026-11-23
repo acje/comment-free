@@ -671,6 +671,17 @@ mod rustdoc_link_idiom_tests {
         rewrite_rustdoc_link_idioms(s)
     }
     #[test]
+    fn inner_line_doc_splice_rewrites_the_bang_marker_form() {
+        let original = "//! see [Type] here\npub fn f() {}\n";
+        let ast: syn::File = syn::parse_file(original).unwrap();
+        let splices = super::collect_doc_splices(&ast, original);
+        let rewritten = super::apply_splices(original, splices);
+        assert_eq!(
+            rewritten, "//! see [`Type`] here\npub fn f() {}\n",
+            "the crate-level inner-doc splice did not rewrite its own marker form"
+        );
+    }
+    #[test]
     fn redundant_explicit_link_collapses_and_ticks() {
         assert_eq!(rw("see [Type](Type) for"), "see [`Type`] for");
     }

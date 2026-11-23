@@ -289,8 +289,8 @@ warnings. `rustfmt` runs on **stable defaults only**; do not add a
 `adr-fmt` supplies governance guidelines and an example template, not a
 shipped default decision corpus. Our repository-owned Accepted corpus lives
 in [docs/adr/](docs/adr/), discovered through `adr-fmt.toml`. Its root,
-[CF-0001](docs/adr/cf/CF-0001-bootstrap-adr-governance.md), and its five
-focused child records are **Accepted**. They record existing contracts,
+[CF-0001](docs/adr/cf/CF-0001-bootstrap-adr-governance.md), and the focused
+records beneath it are **Accepted**. They record existing contracts,
 not new policy or replacements for existing governing documentation.
 Upstream AFM decisions and the example CHE corpus are not imported.
 
@@ -323,8 +323,9 @@ former L012 Draft-parent advisories are gone. A later pass promoted the
 same-domain first reference in CF-0003 through CF-0006, so `adr-fmt --lint`
 now reports zero L015 advisories.
 `--context` emits rules only from Accepted, non-stale ADRs; this run
-exited 0 and emitted 17 tagged rules for `comment-free`. `--tree CF` exited 0
-and listed the six connected Accepted records without a hand-maintained index.
+exited 0 and emitted the corpus's tagged rules for `comment-free`. `--tree CF`
+exited 0 and listed the connected Accepted records then present without a
+hand-maintained index.
 Use [the local template](docs/adr/TEMPLATE.md) for source-backed additions.
 The `docs/adr/stale/.gitkeep`
 placeholder keeps the required retirement directory present while there

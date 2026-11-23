@@ -38,7 +38,8 @@ version two. Bounded detail emission breaks the old one-record-per-corpus-item
 assumption, so consumers use full and shown/hidden summary totals. The deprecated
 `lint_summary_record` remains explicitly v2; `LintTotals::record` is the v3 API.
 These source-backed behaviors are covered by `legacy_summary_helper_keeps_its_legacy_version`
-and `warning_file_cap_preserves_full_verdict_and_counts` in the linked tests.
+and `warning_file_cap_preserves_full_verdict_and_counts` in the linked
+[record tests](../../../tests/records.rs) and [cap tests](../../../tests/caps.rs).
 The specification's seven
 compatibility rules and outcome-specific evidence fields remain the
 contract. Paths use `Path::display`, so non-UTF-8 paths are lossy; JSON

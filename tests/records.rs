@@ -750,3 +750,90 @@ fn parser_rejects_a_diagnostic_record_version_it_does_not_understand() {
     let line = "{\"record\":\"lint_summary\",\"v\":99,\"files\":1,\"findings\":0,\"errors\":0}";
     assert_eq!(parse_record(line), Err(RecordError::VersionTooNew(99)));
 }
+
+#[test]
+fn lint_summary_field_order_matches_the_published_grammar() {
+    let td = tempfile::tempdir().unwrap();
+    write(td.path(), "a.rs", "fn f() {}\n");
+    let out = run_lint(td.path());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let emitted_line = stderr
+        .lines()
+        .find(|line| line.starts_with("{\"record\":\"lint_summary\""))
+        .unwrap_or_else(|| panic!("no lint_summary record:\n{stderr}"));
+    let emitted: Vec<String> = parse_record(emitted_line)
+        .expect("the emitted lint_summary must parse")
+        .keys()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let grammar_line = comment_free::DIAGNOSTIC_RECORD_GRAMMAR
+        .lines()
+        .find(|line| line.contains("\"lint_summary\""))
+        .expect("the diagnostic grammar declares lint_summary");
+    let grammar: Vec<String> = grammar_line
+        .split(',')
+        .map(|field| {
+            let after_open = field
+                .split_once('"')
+                .expect("a grammar field opens with a quoted key")
+                .1;
+            after_open
+                .split_once('"')
+                .expect("a grammar field closes its quoted key")
+                .0
+                .to_string()
+        })
+        .collect();
+    let doc_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/record-format.md");
+    let docs = fs::read_to_string(doc_path).expect("the record format doc is readable");
+    let docs_line = docs
+        .lines()
+        .find(|line| line.starts_with("{\"record\":\"lint_summary\""))
+        .expect("docs/record-format.md shows a lint_summary example");
+    let documented: Vec<String> = parse_record(docs_line)
+        .expect("the documented lint_summary example must parse")
+        .keys()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let expected: Vec<String> = [
+        "record",
+        "v",
+        "root",
+        "scope",
+        "max_warning_files",
+        "files",
+        "errors",
+        "warning_files",
+        "warning_files_shown",
+        "warning_files_hidden",
+        "findings",
+        "findings_shown",
+        "findings_hidden",
+        "undecided",
+        "undecided_shown",
+        "undecided_hidden",
+        "overlong_doc_findings",
+        "overlong_doc_undecided",
+        "over_budget",
+        "configuration_dependent",
+        "unreadable_doc_payload",
+        "uninspected_macro_body",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    assert_eq!(
+        emitted, expected,
+        "the emitted lint_summary key order drifted from the literal order:\n{emitted_line}"
+    );
+    assert_eq!(
+        grammar, expected,
+        "DIAGNOSTIC_RECORD_GRAMMAR reordered lint_summary:\n{grammar_line}"
+    );
+    assert_eq!(
+        documented, expected,
+        "the docs/record-format.md example reordered lint_summary:\n{docs_line}"
+    );
+}

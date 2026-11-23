@@ -1,0 +1,36 @@
+name: gate
+
+# The same candidate gate release.yml runs before it packages an asset, run on
+# every candidate: a push to main and every pull request. The candidate is
+# proved continuously instead of only in the tag moment, and a red gate here is
+# the same red gate that would block a release.
+#
+# Deliberately no package, attest, or publish step, and read-only permissions:
+# this workflow has nothing to publish and no secret to be given, so a pull
+# request from any source can run it safely.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A superseded candidate has nothing left to prove: cancel it rather than burn a
+# full build per intermediate push.
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.100.0
+          components: clippy,rustfmt
+      - name: Candidate gate
+        run: sh scripts/verify.sh

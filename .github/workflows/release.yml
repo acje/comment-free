@@ -1,0 +1,189 @@
+name: release
+
+# Publishes exactly the artifacts this repository's own candidate gate proved.
+# Each target is built once on its native runner, and that same checkout runs
+# `sh scripts/verify.sh` before the binary is packaged, so the shipped asset is
+# the one the gate passed. The publish job only assembles uploaded artifacts; it
+# never rebuilds.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      expected_tag:
+        description: 'Rehearsal tag (must equal the Cargo.toml version); never publishes'
+        required: true
+        type: string
+
+# Restated explicitly rather than inherited from defaults: contents to create
+# the release, id-token + attestations for the build provenance attestation.
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+# A release is a tag moment: never cancel a half-built set of assets.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    # The guard only reads the repository; it does not need the write scope the
+    # publishing job carries.
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Tag and version guard (fail closed)
+        id: tag
+        shell: bash
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.expected_tag }}
+        run: |
+          set -euo pipefail
+          : "${TAG:?TAG is empty: refused}"
+          case "$TAG" in
+            v*) ;;
+            *) echo "TAG-GUARD-FAIL: tag '$TAG' does not match v*" >&2; exit 1 ;;
+          esac
+          VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/^version = "(.*)"$/\1/')"
+          case "$VERSION" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "TAG-GUARD-FAIL: unnormalizable version '$VERSION' from Cargo.toml" >&2; exit 1 ;;
+          esac
+          if [ "${TAG#v}" != "$VERSION" ]; then
+            echo "TAG-GUARD-FAIL: tag '$TAG' (version '${TAG#v}') != Cargo.toml version '$VERSION'" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  build-linux-musl:
+    needs: guard
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.guard.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.100.0
+          targets: x86_64-unknown-linux-musl
+          components: clippy,rustfmt
+
+      - name: Candidate gate
+        run: sh scripts/verify.sh
+
+      - name: Build release binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      - name: Package dist/
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/x86_64-unknown-linux-musl/release/comment-free
+          ASSET="dist/comment-free-${TAG}-x86_64-unknown-linux-musl"
+          [ -e "$BIN" ] || { echo "PACKAGE-FAIL: missing $BIN" >&2; exit 1; }
+          [ -x "$BIN" ] || { echo "PACKAGE-FAIL: $BIN not executable" >&2; exit 1; }
+          mkdir -p dist
+          cp -f "$BIN" "$ASSET"
+          chmod 0755 "$ASSET"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          # Binary asset only, deliberately: SHA256SUMS is derived later, and the
+          # attestation must bind the shipped executable.
+          subject-path: dist/comment-free-*
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-musl
+          path: dist/comment-free-*
+          if-no-files-found: error
+          retention-days: 7
+
+  build-darwin-aarch64:
+    needs: guard
+    runs-on: macos-14
+    env:
+      TAG: ${{ needs.guard.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.100.0
+          targets: aarch64-apple-darwin
+          components: clippy,rustfmt
+
+      - name: Candidate gate
+        run: sh scripts/verify.sh
+
+      - name: Build release binary
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Package dist/
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN=target/aarch64-apple-darwin/release/comment-free
+          ASSET="dist/comment-free-${TAG}-aarch64-apple-darwin"
+          [ -e "$BIN" ] || { echo "PACKAGE-FAIL: missing $BIN" >&2; exit 1; }
+          [ -x "$BIN" ] || { echo "PACKAGE-FAIL: $BIN not executable" >&2; exit 1; }
+          mkdir -p dist
+          cp -f "$BIN" "$ASSET"
+          chmod 0755 "$ASSET"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/comment-free-*
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: darwin-aarch64
+          path: dist/comment-free-*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [guard, build-linux-musl, build-darwin-aarch64]
+    # workflow_dispatch is the rehearsal path: it proves the guard and both
+    # builds, and must never publish.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      # Checkout only supplies the release notes file; the artifacts come from
+      # the build jobs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Names are relative, so `shasum -a 256 -c SHA256SUMS` works from
+          # inside the download directory.
+          (cd dist && sha256sum comment-free-* > SHA256SUMS)
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.guard.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # `gh` is preinstalled on ubuntu-latest. --verify-tag refuses to create
+          # a release for a tag that was not pushed.
+          gh release create "$TAG" dist/* \
+            --verify-tag \
+            --notes-file .github/release-notes.md \
+            --generate-notes

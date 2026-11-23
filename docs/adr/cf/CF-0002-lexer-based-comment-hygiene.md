@@ -17,7 +17,7 @@ marker removal cannot distinguish comments from program data. The existing
 tool uses Rust syntax for doc-link edits and lexer tokens for stripping.
 This record documents that boundary, not a new documentation policy.
 Sources: [README](../../../README.md#comment-free),
-[AGENTS](../../../AGENTS.md#what-this-repo-is), and
+[AGENTS](../../../AGENTS.md#target-classification--entrypoint), and
 [implementation](../../../src/lib.rs) (`process_file`),
 [implementation](../../../src/strip.rs) (`strip_line_comments_with_counts`).
 

@@ -17,7 +17,7 @@ from which it was extracted. Its lexer dependency is an unstable snapshot.
 Sources: [Cargo.toml](../../../Cargo.toml),
 [toolchain pin](../../../rust-toolchain.toml),
 [supply-chain configuration](../../../deny.toml),
-[operational guidance](../../../AGENTS.md#build--test--lint), and
+[operational guidance](../../../AGENTS.md#toolchain--compiler-standards), and
 [CI](../../../.github/workflows/ci-reusable.yml).
 This record documents existing build constraints without importing workspace
 inheritance or policies from the reference corpus.
@@ -33,7 +33,7 @@ R2 [5]: Preserve the Rust toolchain pin and exact lexer snapshot requirement in 
 
 R3 [5]: Apply the configured cargo-deny advisory, license, ban, and source checks alongside cargo-audit; retain local build, test, Clippy, and formatting checks documented in AGENTS.md.
 
-The current values are Rust 1.98.0, edition 2024, and
+The current values are Rust 1.100.0, edition 2024, and
 `ra-ap-rustc_lexer = "=0.174.0"`. `deny.toml` denies yanked packages,
 wildcards, unknown registries, and unknown Git sources; multiple versions
 are warnings, not a universal ban. Its license allowlist is explicit.

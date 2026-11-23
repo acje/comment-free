@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each integration binary uses a subset of the shared fixture helpers"
+)]
 
 pub(crate) use std::fs;
 pub(crate) use std::path::Path;
@@ -58,7 +61,7 @@ pub(crate) enum RecordError {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Record {
-    pub(crate) fields: Vec<(String, Field)>,
+    fields: Vec<(String, Field)>,
 }
 
 impl Record {

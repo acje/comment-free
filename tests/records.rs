@@ -209,7 +209,7 @@ fn rewrite_summary_record_emitted_on_stderr_with_counters() {
         "doc_links_rewritten",
     ] {
         assert!(
-            summary.fields.iter().any(|(k, _)| k == field),
+            summary.keys().contains(&field),
             "rewrite_summary missing `{field}` field:\n{stderr}"
         );
     }

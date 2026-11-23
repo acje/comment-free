@@ -202,9 +202,12 @@ records or alter legacy lint/rewrite exits. Policy records deliberately use
 Policy acceptance tests require Python 3.9+ (standard library only) and the
 pinned rustc; run `cargo test --locked --test policy_gate` locally.
 
-Install the same canonical revision used by the dedicated ADR CI job:
+CI installs adr-fmt from its default branch. This trades reproducibility for
+currency deliberately until adr-fmt is published; a broken adr-fmt default
+branch now breaks this repository's CI, and that risk is accepted rather than
+mitigated with a fallback pin. The local command matches CI:
 ```sh
-cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
+cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --locked adr-fmt
 ```
 
 From the repository root, run the local ADR checks and discovery commands:
@@ -214,7 +217,7 @@ adr-fmt --tree CF
 adr-fmt --context comment-free
 ```
 
-CI runs the same `adr-fmt --lint` command. At the pinned revision, lint
+CI runs the same `adr-fmt --lint` command. At the installed revision, lint
 findings are advisory warnings and exit 0; they do not fail CI. Configuration
 or infrastructure errors can exit 1. This is not a zero-warning enforcement
 gate; inspect the diagnostics as well as the exit code.

@@ -295,11 +295,14 @@ records beneath it are **Accepted**. They record existing contracts,
 not new policy or replacements for existing governing documentation.
 Upstream AFM decisions and the example CHE corpus are not imported.
 
-Install the canonical revision pinned in CI, with an explicit invoking
-toolchain because `cargo install --git` ignores the source toolchain pin:
+CI installs adr-fmt from its default branch. The local install below matches
+it, with an explicit invoking toolchain because `cargo install --git` ignores
+the source toolchain pin. This trades reproducibility for currency
+deliberately until adr-fmt is published; a broken adr-fmt default branch now
+breaks this repository's CI.
 
 ```sh
-cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --rev 30d13bf9d6ada9ac170b29ae76a7d776109f5655 --locked adr-fmt
+cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --locked adr-fmt
 ```
 
 From the repository root:
@@ -311,12 +314,13 @@ adr-fmt --context comment-free
 ```
 
 The dedicated ADR CI job runs the same `adr-fmt --lint` command. At the
-pinned revision, lint findings are advisory warnings and exit 0; they do
+installed revision, lint findings are advisory warnings and exit 0; they do
 not fail CI. Configuration or infrastructure errors can exit 1. This is
 not a zero-warning enforcement gate: inspect the diagnostics too.
 
 Validation on 2026-09-06 used installed canonical `adr-fmt` 0.3.0 at revision
-`83fc20bd2cbe0976388ae74193226750d4afc471`, not the unchanged CI pin above.
+`83fc20bd2cbe0976388ae74193226750d4afc471`, not the revision CI installed at
+the time.
 Lint exited 0 with four L015 advisories for CF-0003 through CF-0006: their
 first reference is the root while later references include same-domain
 non-root records. Reference order and parentage are preserved; the five

@@ -89,6 +89,20 @@ jobs:
           ASSET="dist/comment-free-${TAG}-x86_64-unknown-linux-musl"
           [ -e "$BIN" ] || { echo "PACKAGE-FAIL: missing $BIN" >&2; exit 1; }
           [ -x "$BIN" ] || { echo "PACKAGE-FAIL: $BIN not executable" >&2; exit 1; }
+          # The runner label does not state the architecture; the artefact must.
+          # readelf's "no dynamic section" is the decisive static-link proof;
+          # ldd is deliberately not used (unstable contract, may execute BIN).
+          case "$BIN" in
+            */x86_64-unknown-linux-musl/*) ;;
+            *) echo "ARCH-FAIL: unexpected build path $BIN" >&2; exit 1 ;;
+          esac
+          rustc -vV
+          file "$BIN"
+          file "$BIN" | grep -q 'ELF 64-bit' || { echo "ARCH-FAIL: $BIN is not a 64-bit ELF" >&2; exit 1; }
+          file "$BIN" | grep -Eq 'statically linked|static-pie linked' || { echo "ARCH-FAIL: $BIN is not statically linked" >&2; exit 1; }
+          command -v readelf >/dev/null 2>&1 || { echo "ARCH-FAIL: readelf is unavailable; cannot prove static linkage" >&2; exit 1; }
+          readelf -d "$BIN"
+          readelf -d "$BIN" 2>&1 | grep -q 'There is no dynamic section in this file' || { echo "ARCH-FAIL: $BIN has a dynamic section" >&2; exit 1; }
           mkdir -p dist
           cp -f "$BIN" "$ASSET"
           chmod 0755 "$ASSET"
@@ -134,6 +148,19 @@ jobs:
           ASSET="dist/comment-free-${TAG}-aarch64-apple-darwin"
           [ -e "$BIN" ] || { echo "PACKAGE-FAIL: missing $BIN" >&2; exit 1; }
           [ -x "$BIN" ] || { echo "PACKAGE-FAIL: $BIN not executable" >&2; exit 1; }
+          # macos-latest is a moving label; the artefact must be arm64-only.
+          case "$BIN" in
+            */aarch64-apple-darwin/*) ;;
+            *) echo "ARCH-FAIL: unexpected build path $BIN" >&2; exit 1 ;;
+          esac
+          rustc -vV
+          file "$BIN"
+          lipo -info "$BIN"
+          file "$BIN" | grep -q 'arm64' || { echo "ARCH-FAIL: $BIN is not arm64" >&2; exit 1; }
+          if lipo -info "$BIN" | grep -q 'x86_64'; then
+            echo "ARCH-FAIL: $BIN contains x86_64 code" >&2
+            exit 1
+          fi
           mkdir -p dist
           cp -f "$BIN" "$ASSET"
           chmod 0755 "$ASSET"

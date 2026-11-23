@@ -4,17 +4,6 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-echo "==> Running closed-error gate check (non-exhaustive-check / RST-0006)..."
-# Public error enums must not carry #[non_exhaustive] (C4.5/C4.6)
-if command -v non-exhaustive-check >/dev/null 2>&1; then
-  non-exhaustive-check "$ROOT/src"
-elif [ -f "$ROOT/../tripwires/Cargo.toml" ]; then
-  cargo run --manifest-path "$ROOT/../tripwires/Cargo.toml" --locked -p non-exhaustive-check -- "$ROOT/src"
-else
-  echo "::error::non-exhaustive-check: missing gate executable" >&2
-  exit 1
-fi
-
 echo "==> Running unsafe-code gate check (forbid-unsafe-total / RST-0005)..."
 # All crate roots must enforce #![forbid(unsafe_code)]
 grep -q 'forbid(unsafe_code)' "$ROOT/src/lib.rs" || {

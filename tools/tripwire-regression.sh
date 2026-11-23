@@ -2,30 +2,66 @@
 set -eu
 
 # tripwire-regression: Four-step guard proof harness proving gates bite
-# 1. plant violation -> 2. observe failure -> 3. revert -> 4. observe clean
+# 1. plant a compiling violation -> 2. observe failure -> 3. revert -> 4. observe clean
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-echo "==> [tripwire-regression] Testing non-exhaustive-check gate bite..."
-# 1. Plant violation: add #[derive(thiserror::Error)] #[non_exhaustive] pub enum PlantedTestEnum to src/
-PLANTED_SRC="$ROOT/src/planted_test_enum.rs"
-printf '#[derive(thiserror::Error, Debug)]\n#[error("planted")]\n#[non_exhaustive]\npub enum PlantedTestEnum {}\n' > "$PLANTED_SRC"
+LIB="$ROOT/src/lib.rs"
+BACKUP=$(mktemp "${TMPDIR:-/tmp}/comment-free-lib.XXXXXX")
+cp -f "$LIB" "$BACKUP"
 
-# 2. Observe failure
-if sh scripts/verify.sh >/dev/null 2>&1; then
-  rm -f "$PLANTED_SRC"
-  echo "::error::tripwire-regression: gate failed to bite on planted #[non_exhaustive]" >&2
+restore_lib() {
+  if [ -f "$BACKUP" ]; then
+    cp -f "$BACKUP" "$LIB"
+  fi
+}
+trap 'restore_lib' 0 1 2 15
+
+expect_status() {
+  expected=$1
+  shift
+  label=$1
+  shift
+  set +e
+  "$@"
+  actual=$?
+  set -e
+  echo "==> [tripwire-regression] $label exited $actual (expected $expected)"
+  if [ "$actual" -ne "$expected" ]; then
+    echo "::error::tripwire-regression: $label exited $actual (expected $expected)" >&2
+    exit 1
+  fi
+}
+
+echo "==> [tripwire-regression] Testing the closed-error gate bite via a manual Error impl..."
+
+cat >> "$LIB" <<'PLANT'
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PlantedTestEnum {
+    Planted,
+}
+impl std::fmt::Display for PlantedTestEnum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("planted")
+    }
+}
+impl std::error::Error for PlantedTestEnum {}
+PLANT
+
+expect_status 0 "plant builds (cargo build --all-targets --locked)" cargo build --all-targets --locked
+expect_status 101 "verify.sh with plant" sh scripts/verify.sh
+
+restore_lib
+
+expect_status 0 "verify.sh after revert" sh scripts/verify.sh
+
+if ! cmp -s "$BACKUP" "$LIB"; then
+  echo "::error::tripwire-regression: src/lib.rs was not restored byte-for-byte" >&2
   exit 1
 fi
-
-# 3. Revert
-rm -f "$PLANTED_SRC"
-
-# 4. Observe clean
-sh scripts/verify.sh >/dev/null 2>&1 || {
-  echo "::error::tripwire-regression: gate failed to pass after revert" >&2
-  exit 1
-}
+rm -f "$BACKUP"
 
 echo "OK: tripwire-regression all guard proofs verified clean."

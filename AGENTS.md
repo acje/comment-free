@@ -167,8 +167,13 @@ Do not invent artificial domain restrictions where none exist.
 ### Closed Error Enum Policy (C4.5/C4.6)
 Public error enums MUST NOT carry `#[non_exhaustive]`. Variant sets are complete
 within a major semver line, making unhandled error states unrepresentable at
-compile time. Enforced mechanically via `non-exhaustive-check` from the canonical
-`tripwires` repository.
+compile time. Enforced mechanically by the integration test
+`tests/closed_error_policy.rs`, run by `cargo test` and `scripts/verify.sh`: an
+AST scan of `src/` covering `#[derive(Error)]` and manual
+`std::error::Error`/`core::error::Error` impls. The check is a spelling
+heuristic — error identity comes from the last path segment, aliases and
+out-of-line module ancestry are not evaluated, and `#[cfg(test)]` regions are
+excluded.
 
 ### Consumption
 Installed, not vendored:

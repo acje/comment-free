@@ -6,7 +6,6 @@ edition = "2024"
 resolver = "3"
 rust-version = "1.99"
 license = "Apache-2.0 OR MIT"
-homepage = "https://github.com/acje/comment-free"
 repository = "https://github.com/acje/comment-free"
 readme = "README.md"
 authors = ["Mattilsynet"]

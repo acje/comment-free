@@ -340,7 +340,6 @@ pub fn rewrite_summary_record(mode: RewriteMode, counts: &RewriteCounts) -> Stri
 }
 /// Which per-file failure a `run_error` record reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RunErrorKind {
     /// Directory traversal could not read an entry.
     Walk,

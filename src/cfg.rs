@@ -21,14 +21,16 @@ impl CfgTruth {
         match (self, other) {
             (Self::Never, _) | (_, Self::Never) => Self::Never,
             (Self::Always, Self::Always) => Self::Always,
-            _ => Self::Unresolved,
+            (Self::Unresolved, Self::Unresolved | Self::Always)
+            | (Self::Always, Self::Unresolved) => Self::Unresolved,
         }
     }
     const fn or(self, other: Self) -> Self {
         match (self, other) {
             (Self::Always, _) | (_, Self::Always) => Self::Always,
             (Self::Never, Self::Never) => Self::Never,
-            _ => Self::Unresolved,
+            (Self::Never, Self::Unresolved)
+            | (Self::Unresolved, Self::Never | Self::Unresolved) => Self::Unresolved,
         }
     }
     const fn negate(self) -> Self {

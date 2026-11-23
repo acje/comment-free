@@ -84,7 +84,6 @@ impl BudgetTotals {
                 UndecidedCause::ConfigurationDependent { .. } => &mut next.configuration_dependent,
                 UndecidedCause::UnreadableDocPayload => &mut next.unreadable_doc_payload,
                 UndecidedCause::UninspectedMacroBody => &mut next.uninspected_macro_body,
-                _ => return Err(Fault::UnsupportedCause),
             };
             counts.add(1, admitted)?;
         }
@@ -105,7 +104,6 @@ impl BudgetTotals {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Fault {
     CounterOverflow,
-    UnsupportedCause,
     Output,
 }
 
@@ -254,7 +252,6 @@ impl Policy {
                 }
             }
             Accounting::Failed(Fault::CounterOverflow) => reasons.push("counter_overflow"),
-            Accounting::Failed(Fault::UnsupportedCause) => reasons.push("processing_error"),
             Accounting::Failed(Fault::Output) => reasons.push("output_error"),
         }
         if self.advisory.undecided.total() != self.advisory.uninspected_macro_body.total() {

@@ -87,7 +87,6 @@ impl DocFinding {
 }
 /// Finding kind carried by the `kind` field of every `doc_lint_*` record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum DocLintKind {
     /// Doc-comment prose exceeded the configured word budget.
     OverlongDoc,
@@ -105,9 +104,8 @@ impl DocLintKind {
 ///
 /// A pass that cannot decide an item — an unresolved `cfg` predicate, a
 /// doc payload it cannot read — reports an explicit indeterminate
-/// outcome as an added variant rather than a record-version bump.
+/// outcome. The outcome set is closed within a major release line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum DocLintOutcome {
     /// The item was inspected and violates the budget.
     Finding,
@@ -144,7 +142,6 @@ impl DocLintOutcome {
 /// resolves to text this tool never sees, so no count of it is
 /// representable here.
 #[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
 pub enum UndecidedCause {
     /// Part of the doc set sits behind unresolved `cfg` predicates.
     /// Carries both bounds: the count present in every configuration,

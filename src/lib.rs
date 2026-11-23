@@ -42,7 +42,6 @@ pub const DOC_LINT_DOCTRINE_MSG: &str = "Rust docs must contain a concise summar
 /// alone, so a write-mode run cannot name a diff width it will never
 /// render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RewriteMode {
     /// Files were replaced on disk.
     Write,

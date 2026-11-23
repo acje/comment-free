@@ -165,17 +165,19 @@ Independent booleans remain valid booleans; genuine optionality remains `Option`
 Do not invent artificial domain restrictions where none exist.
 
 ### Closed Error Enum Policy (C4.5/C4.6)
-Public error enums MUST NOT carry `#[non_exhaustive]`. Variant sets are complete
-within a major semver line, making unhandled error states unrepresentable at
-compile time. Enforced mechanically by the integration test
-`tests/closed_error_policy.rs`, run by `cargo test` and `scripts/verify.sh`: an
-AST scan of `src/` covering `#[derive(Error)]` and manual
-`std::error::Error`/`core::error::Error` impls. The check is a spelling
-heuristic — error identity is any trait path whose last segment is `Error` (so
-a custom `Error` trait matches too), aliases and out-of-line module ancestry
-are not evaluated, and `#[cfg(test)]` exclusion covers inline modules only: a
-`#[cfg(test)] mod tests;` file under `src/` is still scanned because analysis
-is per-file.
+Public error and state/outcome enums MUST NOT carry `#[non_exhaustive]`.
+Variant sets are complete within a major semver line, making unhandled error
+and state transitions unrepresentable at compile time. Enforced mechanically by
+the integration test `tests/closed_error_policy.rs`, run by `cargo test` and
+`scripts/verify.sh`: an AST scan of `src/` covering `#[derive(Error)]` and
+manual `std::error::Error`/`core::error::Error` impls, plus every public
+state/outcome enum, defined as any public enum that is not a `#[repr(...)]` or
+serde `Serialize`/`Deserialize` wire DTO. There are zero name exemptions. The
+check is a spelling heuristic — error identity is any trait path whose last
+segment is `Error` (so a custom `Error` trait matches too), aliases and
+out-of-line module ancestry are not evaluated, and `#[cfg(test)]` exclusion
+covers inline modules only: a `#[cfg(test)] mod tests;` file under `src/` is
+still scanned because analysis is per-file.
 
 ### Consumption
 Installed, not vendored:

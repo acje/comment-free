@@ -37,7 +37,7 @@ fn format_violations(violations: &[Violation]) -> String {
 struct ScanReport {
     files: usize,
     pub_enums: usize,
-    pub_error_enums: usize,
+    pub_domain_enums: usize,
     manual_error_impls: usize,
     violations: Vec<Violation>,
 }
@@ -69,17 +69,15 @@ fn scan(root: &Path) -> Result<ScanReport, String> {
     }
 
     let mut pub_enums = 0;
-    let mut pub_error_enums = 0;
+    let mut pub_domain_enums = 0;
     let mut violations = Vec::new();
     for (path, item_enum) in &enums {
         if !is_literal_pub(item_enum) || item_enum.attrs.iter().any(is_cfg_disabled_without_test) {
             continue;
         }
         pub_enums += 1;
-        let is_error =
-            derives_error(item_enum) || manual_error_types.contains(&item_enum.ident.to_string());
-        if is_error {
-            pub_error_enums += 1;
+        if !is_wire_dto(item_enum) {
+            pub_domain_enums += 1;
         }
         if is_violation(item_enum, &manual_error_types) {
             violations.push(Violation {
@@ -95,7 +93,7 @@ fn scan(root: &Path) -> Result<ScanReport, String> {
     Ok(ScanReport {
         files: files.len(),
         pub_enums,
-        pub_error_enums,
+        pub_domain_enums,
         manual_error_impls: manual_error_types.len(),
         violations,
     })
@@ -297,6 +295,22 @@ fn derives_error(item_enum: &ItemEnum) -> bool {
         .any(|name| name == "Error")
 }
 
+fn is_wire_dto(item_enum: &ItemEnum) -> bool {
+    item_enum
+        .attrs
+        .iter()
+        .any(|attr| attr_path_is(attr, "repr"))
+        || item_enum
+            .attrs
+            .iter()
+            .flat_map(derive_idents)
+            .any(|name| name == "Serialize" || name == "Deserialize")
+}
+
+fn is_error_enum(item_enum: &ItemEnum, manual_error_types: &BTreeSet<String>) -> bool {
+    derives_error(item_enum) || manual_error_types.contains(&item_enum.ident.to_string())
+}
+
 fn is_violation(item_enum: &ItemEnum, manual_error_types: &BTreeSet<String>) -> bool {
     if !is_literal_pub(item_enum) || item_enum.attrs.iter().any(is_cfg_disabled_without_test) {
         return false;
@@ -305,8 +319,7 @@ fn is_violation(item_enum: &ItemEnum, manual_error_types: &BTreeSet<String>) -> 
         .attrs
         .iter()
         .any(|attr| attr_path_is(attr, "non_exhaustive"));
-    has_non_exhaustive
-        && (derives_error(item_enum) || manual_error_types.contains(&item_enum.ident.to_string()))
+    has_non_exhaustive && (is_error_enum(item_enum, manual_error_types) || !is_wire_dto(item_enum))
 }
 
 fn enum_span_line(item_enum: &ItemEnum) -> Option<usize> {
@@ -352,10 +365,10 @@ fn public_error_enums_are_closed() {
     let report = scan(&source_root).expect("src/ must scan cleanly");
     let files = report.files;
     let pub_enums = report.pub_enums;
-    let pub_error_enums = report.pub_error_enums;
+    let pub_domain_enums = report.pub_domain_enums;
     let manual_impls = report.manual_error_impls;
     println!(
-        "closed-error scan: files={files} pub_enums={pub_enums} pub_error_enums={pub_error_enums} manual_error_impls={manual_impls} violations={}",
+        "closed-error scan: files={files} pub_enums={pub_enums} pub_domain_enums={pub_domain_enums} manual_error_impls={manual_impls} violations={}",
         report.violations.len()
     );
     assert!(
@@ -367,8 +380,8 @@ fn public_error_enums_are_closed() {
         "expected at least 10 pub enums under src/, scanned {pub_enums}"
     );
     assert!(
-        pub_error_enums >= 2,
-        "expected at least 2 pub error enums, scanned {pub_error_enums}"
+        pub_domain_enums >= 2,
+        "expected at least 2 pub domain enums, scanned {pub_domain_enums}"
     );
     assert!(
         report.violations.is_empty(),
@@ -484,7 +497,7 @@ fn cross_file_manual_impl_flags_enum() {
     let report = scan(dir.path()).expect("fixture tree must scan");
     assert_eq!(report.files, 2);
     assert_eq!(report.pub_enums, 1);
-    assert_eq!(report.pub_error_enums, 1);
+    assert_eq!(report.pub_domain_enums, 1);
     assert_eq!(report.manual_error_impls, 1);
     assert_eq!(report.violations.len(), 1);
     let violation = &report.violations[0];
@@ -494,16 +507,20 @@ fn cross_file_manual_impl_flags_enum() {
 }
 
 #[test]
-fn non_error_non_exhaustive_enum_is_silent() {
-    assert!(!flags_with_manual(
-        "#[non_exhaustive] pub enum DomainEvent { A }",
-        "impl std::error::Error for OtherError {}"
+fn non_exhaustive_state_enum_is_flagged() {
+    assert!(flags("#[non_exhaustive] pub enum DomainEvent { A }"));
+}
+
+#[test]
+fn non_exhaustive_serde_dto_is_silent() {
+    assert!(!flags(
+        "#[derive(Serialize, Deserialize)] #[non_exhaustive] pub enum WireEvent { A }"
     ));
 }
 
 #[test]
 fn manual_impl_in_cfg_test_module_does_not_taint_production_enum() {
-    let production = "#[non_exhaustive]\npub enum ProductionError { A }\n";
+    let production = "#[derive(Serialize)]\n#[non_exhaustive]\npub enum ProductionError { A }\n";
     let test_only = "#[cfg(test)]\nmod tests { impl std::error::Error for ProductionError {} }\n";
     let manual = manual_error_types(test_only);
     assert!(
@@ -584,8 +601,8 @@ fn cfg_attr_is_not_expanded_and_derive_identity_is_not_resolved() {
     }
     for source in [
         "#[cfg_attr(feature = \"x\", non_exhaustive)] #[derive(thiserror::Error)] pub enum E { A }",
-        "#[derive(AliasedError)] #[non_exhaustive] pub enum E { A }",
-        "#[derive(Debug)] #[non_exhaustive] pub enum E { A }",
+        "#[derive(AliasedError, Serialize)] #[non_exhaustive] pub enum E { A }",
+        "#[derive(Debug, Serialize)] #[non_exhaustive] pub enum E { A }",
         "#[derive(thiserror::Error)] #[non_exhaustive] pub(crate) enum E { A }",
         "#[cfg(feature = \"x\")] #[cfg(test)] #[derive(thiserror::Error)] #[non_exhaustive] pub enum E { A }",
     ] {

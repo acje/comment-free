@@ -151,69 +151,84 @@ fn arbitrary_directory_scope_is_shared_by_lint_and_write_without_ancestor_discov
     );
 }
 
+fn recursive_scope_fixture(td: &tempfile::TempDir, manifest: bool) -> std::path::PathBuf {
+    let root = td.path().join("checkout");
+    fs::create_dir(&root).unwrap();
+    let original = RECURSIVE_ORIGINAL;
+    fs::write(td.path().join("outside.rs"), "fn invalid( {").unwrap();
+    for name in ["main.rs", "tools/task.rs", "scripts/check.rs", "src/lib.rs"] {
+        let file = root.join(name);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, original).unwrap();
+    }
+    for name in [
+        ".git",
+        ".beads",
+        "target",
+        "BUILD",
+        "vendor",
+        "dist",
+        "node_modules",
+    ] {
+        fs::create_dir(root.join(name)).unwrap();
+        fs::write(root.join(name).join("ignored.rs"), "fn invalid( {").unwrap();
+    }
+    if manifest {
+        fs::write(root.join("Cargo.toml"), "not a valid manifest").unwrap();
+    }
+    root
+}
+
+const RECURSIVE_ORIGINAL: &str =
+    "// removable\n/// one two three four five six\npub fn item() {}\n";
+
+fn assert_recursive_mode(
+    root: &std::path::Path,
+    explicit: bool,
+    args: &[&str],
+    expected: i32,
+    context: &str,
+) {
+    let mut command = Command::new(bin());
+    command.current_dir(root).args(args);
+    if explicit {
+        command.arg(".");
+    }
+    let out = command.output().unwrap();
+    assert_eq!(out.status.code(), Some(expected), "{context}: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if expected == 4 {
+        let summary = one_record(&stderr, "lint_summary");
+        assert_eq!(summary.text("scope"), "recursive-directory");
+        assert_eq!(summary.number("files"), 4);
+        assert_eq!(summary.number("findings_hidden"), 4);
+        assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
+    } else {
+        assert_eq!(one_record(&stderr, "strip_summary").number("rewritten"), 4);
+    }
+    for name in ["main.rs", "tools/task.rs", "scripts/check.rs", "src/lib.rs"] {
+        let wanted = if expected == 0 {
+            RECURSIVE_ORIGINAL.replace("// removable\n", "")
+        } else {
+            RECURSIVE_ORIGINAL.to_owned()
+        };
+        assert_eq!(fs::read_to_string(root.join(name)).unwrap(), wanted);
+    }
+}
+
 #[test]
 fn recursive_scope_includes_custom_sources_and_prunes_hidden_and_build_directories() {
     for manifest in [false, true] {
         for explicit in [false, true] {
             let td = tempfile::tempdir().unwrap();
-            let root = td.path().join("checkout");
-            fs::create_dir(&root).unwrap();
-            let original = "// removable\n/// one two three four five six\npub fn item() {}\n";
-            fs::write(td.path().join("outside.rs"), "fn invalid( {").unwrap();
-            for name in ["main.rs", "tools/task.rs", "scripts/check.rs", "src/lib.rs"] {
-                let file = root.join(name);
-                fs::create_dir_all(file.parent().unwrap()).unwrap();
-                fs::write(file, original).unwrap();
-            }
-            for name in [
-                ".git",
-                ".beads",
-                "target",
-                "BUILD",
-                "vendor",
-                "dist",
-                "node_modules",
-            ] {
-                fs::create_dir(root.join(name)).unwrap();
-                fs::write(root.join(name).join("ignored.rs"), "fn invalid( {").unwrap();
-            }
-            if manifest {
-                fs::write(root.join("Cargo.toml"), "not a valid manifest").unwrap();
-            }
+            let root = recursive_scope_fixture(&td, manifest);
+            let context = format!("{manifest}/{explicit}");
             for (args, expected) in [
                 (vec!["--doc-max-words", "5", "--max-warning-files", "0"], 4),
                 (vec!["--rewrite", "--dry-run"], 3),
                 (vec!["--rewrite"], 0),
             ] {
-                let mut command = Command::new(bin());
-                command.current_dir(&root).args(args);
-                if explicit {
-                    command.arg(".");
-                }
-                let out = command.output().unwrap();
-                assert_eq!(
-                    out.status.code(),
-                    Some(expected),
-                    "{manifest}/{explicit}: {out:?}"
-                );
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if expected == 4 {
-                    let summary = one_record(&stderr, "lint_summary");
-                    assert_eq!(summary.text("scope"), "recursive-directory");
-                    assert_eq!(summary.number("files"), 4);
-                    assert_eq!(summary.number("findings_hidden"), 4);
-                    assert!(out.stdout.is_empty(), "stdout: {:?}", out.stdout);
-                } else {
-                    assert_eq!(one_record(&stderr, "strip_summary").number("rewritten"), 4);
-                }
-                for name in ["main.rs", "tools/task.rs", "scripts/check.rs", "src/lib.rs"] {
-                    let wanted = if expected == 0 {
-                        original.replace("// removable\n", "")
-                    } else {
-                        original.to_owned()
-                    };
-                    assert_eq!(fs::read_to_string(root.join(name)).unwrap(), wanted);
-                }
+                assert_recursive_mode(&root, explicit, &args, expected, &context);
             }
         }
     }

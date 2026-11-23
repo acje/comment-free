@@ -205,31 +205,11 @@ pub fn walk_rs_files(root: &Path) -> impl Iterator<Item = Result<PathBuf, WalkEr
     walk_resolved_roots(resolve_walk_roots(root))
 }
 
-/// How a CLI directory root was selected; neither choice discovers ancestors.
-#[derive(Debug, Clone, Copy)]
-pub enum DirectorySelection {
-    /// Omitted ROOT: recursively scan cwd.
-    DefaultCwd,
-    /// Supplied ROOT: recursively scan the selected directory.
-    Explicit,
-}
-
-/// Iterate Rust sources in a CLI directory scope, preserving pruning and link policy.
-/// All directory roots recurse, regardless of manifests; no ancestors are consulted.
-/// Traversal failures and nested source-hiding links yield [`WalkError`].
-pub fn walk_cli_directory(
-    root: &Path,
-    selection: DirectorySelection,
-) -> impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_> {
-    plan_cli_directory(root, selection).1
-}
-
-/// Resolve a directory scan once, returning its selected policy and traversal.
+/// Resolve a directory scan once, returning its policy and traversal.
 /// Policy is always [`ReportScope::RecursiveDirectory`]. The iterator preserves
 /// traversal failures as [`WalkError`]; manifests do not select CLI scope.
 pub fn plan_cli_directory(
     root: &Path,
-    _selection: DirectorySelection,
 ) -> (
     ReportScope,
     impl Iterator<Item = Result<PathBuf, WalkError>> + use<'_>,

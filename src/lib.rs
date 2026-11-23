@@ -33,10 +33,7 @@ pub use splice::rewrite_rustdoc_link_idioms;
 use splice::{apply_splices, collect_doc_splices};
 pub(crate) use strip::unified_diff;
 pub use strip::{single_line, strip_line_comments, strip_line_comments_with_counts};
-pub use walk::{
-    DirectorySelection, DocScan, plan_cli_directory, scan_doc_files, walk_cli_directory,
-    walk_rs_files,
-};
+pub use walk::{DocScan, plan_cli_directory, scan_doc_files, walk_rs_files};
 /// Doctrine warning carried by the `doc_lint_header` record for every kind.
 pub const DOC_LINT_DOCTRINE_MSG: &str = "Rust docs must contain a concise summary, optionally clear code examples (fenced ``` or ~~~ blocks), and sections explaining edge cases like panics, errors, and safety. Code is excluded from the prose word length: fenced blocks, indented code blocks, and inline code spans. If applicable references to ADRs must be given.";
 /// Which pass a `--rewrite` run made over the tree.

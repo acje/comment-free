@@ -4,12 +4,11 @@ mod policy;
 mod policy_run;
 use clap::Parser;
 use comment_free::{
-    CommentFreeError, DirectorySelection, DocBudget, DocLintKind, FileOutcome, ReportScope,
-    RewriteCounts, RewriteMode, RunErrorKind, WarningLimit, doc_file_warning_record, doc_lint_file,
-    doc_lint_finding_record, doc_lint_header_record, doc_lint_hint_record,
-    doc_lint_truncated_record, doc_lint_undecided_record, plan_cli_directory, process_file,
-    rewrite_file_record, rewrite_summary_record, run_error_record, scan_doc_files,
-    strip_summary_record,
+    CommentFreeError, DocBudget, DocLintKind, FileOutcome, ReportScope, RewriteCounts, RewriteMode,
+    RunErrorKind, WarningLimit, doc_file_warning_record, doc_lint_file, doc_lint_finding_record,
+    doc_lint_header_record, doc_lint_hint_record, doc_lint_truncated_record,
+    doc_lint_undecided_record, plan_cli_directory, process_file, rewrite_file_record,
+    rewrite_summary_record, run_error_record, scan_doc_files, strip_summary_record,
 };
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -228,23 +227,17 @@ type ScopedFiles<'a> = (
     Box<dyn Iterator<Item = Result<PathBuf, comment_free::WalkError>> + 'a>,
 );
 enum InputScope {
-    Directory {
-        path: PathBuf,
-        selection: DirectorySelection,
-    },
+    Directory { path: PathBuf },
     RustFile(PathBuf),
 }
 impl InputScope {
     fn from_path(root: Option<PathBuf>) -> Result<Self, CommentFreeError> {
-        let (path, selection) = match root {
-            Some(path) => (path, DirectorySelection::Explicit),
-            None => (PathBuf::from("."), DirectorySelection::DefaultCwd),
-        };
+        let path = root.unwrap_or_else(|| PathBuf::from("."));
         let metadata =
             std::fs::symlink_metadata(&path).map_err(|_| CommentFreeError::InvalidRoot)?;
         match metadata.file_type() {
-            kind if kind.is_dir() => Ok(Self::Directory { path, selection }),
-            kind if kind.is_symlink() && path.is_dir() => Ok(Self::Directory { path, selection }),
+            kind if kind.is_dir() => Ok(Self::Directory { path }),
+            kind if kind.is_symlink() && path.is_dir() => Ok(Self::Directory { path }),
             kind if kind.is_file() && path.extension().is_some_and(|ext| ext == "rs") => {
                 Ok(Self::RustFile(path))
             }
@@ -254,14 +247,14 @@ impl InputScope {
 
     fn path(&self) -> &Path {
         match self {
-            Self::Directory { path, .. } | Self::RustFile(path) => path,
+            Self::Directory { path } | Self::RustFile(path) => path,
         }
     }
 
     fn files(&self) -> ScopedFiles<'_> {
         match self {
-            Self::Directory { path, selection } => {
-                let (policy, files) = plan_cli_directory(path, *selection);
+            Self::Directory { path } => {
+                let (policy, files) = plan_cli_directory(path);
                 (policy, Box::new(files))
             }
             Self::RustFile(path) => (

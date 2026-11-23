@@ -515,7 +515,7 @@ fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &
         }
     }
 }
-pub(crate) fn prose_word_count(doc_text: &str) -> WordCount {
+fn prose_word_count(doc_text: &str) -> WordCount {
     let lines: Vec<&str> = doc_text.split('\n').collect();
     let mut blocks = BlockScan::new();
     let mut span = CodeSpanState::Closed;

@@ -171,9 +171,11 @@ compile time. Enforced mechanically by the integration test
 `tests/closed_error_policy.rs`, run by `cargo test` and `scripts/verify.sh`: an
 AST scan of `src/` covering `#[derive(Error)]` and manual
 `std::error::Error`/`core::error::Error` impls. The check is a spelling
-heuristic — error identity comes from the last path segment, aliases and
-out-of-line module ancestry are not evaluated, and `#[cfg(test)]` regions are
-excluded.
+heuristic — error identity is any trait path whose last segment is `Error` (so
+a custom `Error` trait matches too), aliases and out-of-line module ancestry
+are not evaluated, and `#[cfg(test)]` exclusion covers inline modules only: a
+`#[cfg(test)] mod tests;` file under `src/` is still scanned because analysis
+is per-file.
 
 ### Consumption
 Installed, not vendored:

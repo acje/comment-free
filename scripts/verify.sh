@@ -15,6 +15,9 @@ grep -q 'forbid(unsafe_code)' "$ROOT/src/main.rs" || {
   exit 1
 }
 
+echo "==> Running closed-error gate check (tests/closed_error_policy.rs / RST-0006)..."
+cargo test --locked --test closed_error_policy
+
 echo "==> Running cargo test..."
 cargo test --locked
 

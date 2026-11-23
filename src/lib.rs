@@ -1,6 +1,5 @@
 //! Pure logic for the `comment-free` tool: parse, re-emit, lint doc-comment budget.
 #![forbid(unsafe_code)]
-#![allow(clippy::wildcard_enum_match_arm)]
 #![warn(clippy::missing_const_for_fn)]
 use std::fs;
 use std::io;
@@ -546,7 +545,11 @@ mod process_file_tests {
         fs::write(&path, "   \n\t\n  \n").unwrap();
         match process_file(&path, opts()) {
             FileOutcome::Unchanged(_) => {}
-            other => panic!("expected Unchanged for whitespace-only file, got {other:?}"),
+            other @ (FileOutcome::Rewritten(_)
+            | FileOutcome::WouldRewrite(_)
+            | FileOutcome::Failed(_)) => {
+                panic!("expected Unchanged for whitespace-only file, got {other:?}")
+            }
         }
     }
     #[test]
@@ -556,7 +559,9 @@ mod process_file_tests {
         fs::write(&path, "").unwrap();
         match process_file(&path, opts()) {
             FileOutcome::Unchanged(_) => {}
-            other => panic!("expected Unchanged for empty file, got {other:?}"),
+            other @ (FileOutcome::Rewritten(_)
+            | FileOutcome::WouldRewrite(_)
+            | FileOutcome::Failed(_)) => panic!("expected Unchanged for empty file, got {other:?}"),
         }
     }
     #[test]
@@ -569,7 +574,11 @@ mod process_file_tests {
                 assert_eq!(preview.counts().comments_removed(), 1);
                 assert!(!preview.diff().is_empty(), "dry run must carry a diff");
             }
-            other => panic!("expected WouldRewrite for SAFETY-only file, got {other:?}"),
+            other @ (FileOutcome::Rewritten(_)
+            | FileOutcome::Unchanged(_)
+            | FileOutcome::Failed(_)) => {
+                panic!("expected WouldRewrite for SAFETY-only file, got {other:?}")
+            }
         }
         assert_eq!(
             fs::read_to_string(&path).unwrap(),

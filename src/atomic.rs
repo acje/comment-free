@@ -114,7 +114,10 @@ mod atomic_write_tests {
             FileOutcome::Failed(e @ FileError::Read(_)) => {
                 assert_eq!(e.kind(), RunErrorKind::Io);
             }
-            other => panic!("expected Failed(Read), got {other:?}"),
+            other @ (FileOutcome::Rewritten(_)
+            | FileOutcome::WouldRewrite(_)
+            | FileOutcome::Unchanged(_)
+            | FileOutcome::Failed(_)) => panic!("expected Failed(Read), got {other:?}"),
         }
     }
     #[test]
@@ -156,7 +159,11 @@ mod atomic_write_tests {
         ));
         match process_file(&path, write_opts()) {
             FileOutcome::Rewritten(_) => {}
-            other => panic!("expected Rewritten after a conflict, got {other:?}"),
+            other @ (FileOutcome::WouldRewrite(_)
+            | FileOutcome::Unchanged(_)
+            | FileOutcome::Failed(_)) => {
+                panic!("expected Rewritten after a conflict, got {other:?}")
+            }
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "fn f() {}\n");
         assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
@@ -168,7 +175,9 @@ mod atomic_write_tests {
         fs::write(&path, "// drop me\nfn f() {}\n").unwrap();
         match process_file(&path, write_opts()) {
             FileOutcome::Rewritten(_) => {}
-            other => panic!("expected Rewritten, got {other:?}"),
+            other @ (FileOutcome::WouldRewrite(_)
+            | FileOutcome::Unchanged(_)
+            | FileOutcome::Failed(_)) => panic!("expected Rewritten, got {other:?}"),
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "fn f() {}\n");
         assert_eq!(dir_entry_names(td.path()), vec!["a.rs".to_string()]);
@@ -206,7 +215,9 @@ mod atomic_write_tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
         match process_file(&path, write_opts()) {
             FileOutcome::Rewritten(_) => {}
-            other => panic!("expected Rewritten, got {other:?}"),
+            other @ (FileOutcome::WouldRewrite(_)
+            | FileOutcome::Unchanged(_)
+            | FileOutcome::Failed(_)) => panic!("expected Rewritten, got {other:?}"),
         }
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640, "mode was {mode:o}");
@@ -224,7 +235,12 @@ mod atomic_write_tests {
                 assert_eq!(e.kind(), RunErrorKind::Io);
                 assert!(e.to_string().contains("symbolic link"), "got {e}");
             }
-            other => panic!("expected Failed(SymlinkDestination), got {other:?}"),
+            other @ (FileOutcome::Rewritten(_)
+            | FileOutcome::WouldRewrite(_)
+            | FileOutcome::Unchanged(_)
+            | FileOutcome::Failed(_)) => {
+                panic!("expected Failed(SymlinkDestination), got {other:?}")
+            }
         }
         assert_eq!(
             fs::read_to_string(&target).unwrap(),

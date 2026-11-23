@@ -27,6 +27,10 @@ pub(crate) fn collect_doc_splices(ast: &syn::File, original: &str) -> Vec<DocSpl
     }
     out
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Item is a non-exhaustive external vocabulary; only container items recurse into nested item attributes"
+)]
 fn collect_item_splices(item: &syn::Item, original: &str, out: &mut Vec<DocSplice>) {
     if let Some(attrs) = item_attrs(item) {
         collect_attr_run_splices(attrs, original, out);
@@ -81,6 +85,10 @@ fn collect_item_splices(item: &syn::Item, original: &str, out: &mut Vec<DocSplic
         _ => {}
     }
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Item is a non-exhaustive external vocabulary; only items carrying inline attributes have splices to find"
+)]
 const fn item_attrs(item: &syn::Item) -> Option<&Vec<Attribute>> {
     use syn::Item::{
         Const, Enum, ExternCrate, Fn, Impl, Macro, Mod, Static, Struct, Trait, TraitAlias, Type,
@@ -104,6 +112,10 @@ const fn item_attrs(item: &syn::Item) -> Option<&Vec<Attribute>> {
         _ => return None,
     })
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::TraitItem is a non-exhaustive external vocabulary; only trait items carrying inline attributes have splices to find"
+)]
 const fn trait_item_attrs(item: &syn::TraitItem) -> Option<&Vec<Attribute>> {
     use syn::TraitItem::{Const, Fn, Macro, Type};
     Some(match item {
@@ -114,6 +126,10 @@ const fn trait_item_attrs(item: &syn::TraitItem) -> Option<&Vec<Attribute>> {
         _ => return None,
     })
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::ImplItem is a non-exhaustive external vocabulary; only impl items carrying inline attributes have splices to find"
+)]
 const fn impl_item_attrs(item: &syn::ImplItem) -> Option<&Vec<Attribute>> {
     use syn::ImplItem::{Const, Fn, Macro, Type};
     Some(match item {
@@ -259,6 +275,10 @@ fn collect_cfg_attr_doc_splices(attrs: &[Attribute], original: &str, out: &mut V
         collect_cfg_attr_list_doc_splices(list, original, out);
     }
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Meta is an external vocabulary; only doc name-values and nested cfg_attr lists carry spliced literals"
+)]
 fn collect_cfg_attr_list_doc_splices(
     list: &syn::MetaList,
     original: &str,

@@ -87,6 +87,10 @@ pub(crate) fn cfg_predicate_args(
 ) -> syn::Result<Punctuated<CfgPredicate, Token![,]>> {
     list.parse_args_with(Punctuated::parse_terminated)
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Meta is an external vocabulary; only a list meta spells cfg_attr"
+)]
 #[must_use]
 pub(crate) fn is_cfg_attr(attr: &Attribute) -> bool {
     match &attr.meta {

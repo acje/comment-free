@@ -473,6 +473,10 @@ fn doc_payload(attr: &Attribute) -> Option<DocPayload> {
     }
     Some(doc_value_payload(&nv.value))
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Expr is a non-exhaustive external vocabulary; only a string-literal expression carries doc prose this tool can read"
+)]
 fn doc_value_payload(value: &syn::Expr) -> DocPayload {
     match value {
         syn::Expr::Lit(syn::ExprLit {
@@ -498,6 +502,10 @@ const fn doc_origin(truth: CfgTruth) -> Option<DocOrigin> {
         CfgTruth::Never => None,
     }
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Meta is an external vocabulary; only doc name-values and nested cfg_attr lists contribute parts"
+)]
 fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &mut Vec<DocPart>) {
     let Ok(args) = cfg_predicate_args(list) else {
         return;
@@ -635,6 +643,10 @@ fn attribute_pound_precedes(trees: &[proc_macro2::TokenTree], index: usize) -> b
     };
     is_punct(1, '#') || (is_punct(1, '!') && is_punct(2, '#'))
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "proc_macro2::TokenTree is an external vocabulary; only identifiers and nested groups can assign a doc attribute"
+)]
 fn assigns_doc(tokens: proc_macro2::TokenStream) -> bool {
     let trees: Vec<proc_macro2::TokenTree> = tokens.into_iter().collect();
     trees.iter().enumerate().any(|(i, tree)| match tree {
@@ -649,6 +661,10 @@ fn assigns_doc(tokens: proc_macro2::TokenStream) -> bool {
         _ => false,
     })
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Item is a non-exhaustive external vocabulary; items outside this linter's label set carry no doc budget"
+)]
 fn item_label_and_attrs(item: &syn::Item) -> Option<(String, &[Attribute], usize)> {
     use syn::Item::{
         Const, Enum, ExternCrate, Fn, Impl, Macro, Mod, Static, Struct, Trait, Type, Union, Use,
@@ -717,6 +733,10 @@ fn item_label_and_attrs(item: &syn::Item) -> Option<(String, &[Attribute], usize
     };
     Some((label, attrs, line))
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::TraitItem is a non-exhaustive external vocabulary; items outside this linter's label set carry no doc budget"
+)]
 fn trait_item_label_and_attrs(item: &syn::TraitItem) -> Option<(String, &[Attribute], usize)> {
     use syn::TraitItem::{Const, Fn, Type};
     let (label, attrs, line): (String, &[Attribute], usize) = match item {
@@ -739,6 +759,10 @@ fn trait_item_label_and_attrs(item: &syn::TraitItem) -> Option<(String, &[Attrib
     };
     Some((label, attrs, line))
 }
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::ImplItem is a non-exhaustive external vocabulary; items outside this linter's label set carry no doc budget"
+)]
 fn impl_item_label_and_attrs(item: &syn::ImplItem) -> Option<(String, &[Attribute], usize)> {
     use syn::ImplItem::{Const, Fn, Type};
     let (label, attrs, line): (String, &[Attribute], usize) = match item {
@@ -781,7 +805,10 @@ mod doc_lint_tests {
                 unconditional,
                 all_configurations,
             } => (unconditional, all_configurations),
-            other => panic!("expected a configuration-dependent cause, got {other:?}"),
+            other @ (super::UndecidedCause::UnreadableDocPayload
+            | super::UndecidedCause::UninspectedMacroBody) => {
+                panic!("expected a configuration-dependent cause, got {other:?}")
+            }
         }
     }
     #[test]

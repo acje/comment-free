@@ -1,10 +1,9 @@
+use crate::cfg::{CfgPredicate, cfg_predicate_args, is_cfg_attr, path_is};
 use crate::markdown::{
     BlockScan, CodeSpanState, LineFrame, advance_span, backtick_run_len, find_matching_bracket,
     reference_definition_label, span_after_run,
 };
-use crate::{CfgPredicate, cfg_predicate_args};
 use std::collections::BTreeSet;
-use syn::ext::IdentExt as _;
 use syn::{Attribute, Meta};
 #[derive(Debug, Clone)]
 pub(crate) struct DocSplice {
@@ -144,12 +143,6 @@ fn collect_attr_run_splices(attrs: &[Attribute], original: &str, out: &mut Vec<D
 #[derive(Debug, Clone, Copy)]
 enum DocShape {
     SafeLineOrAttr,
-}
-pub(crate) fn ident_is(id: &syn::Ident, name: &str) -> bool {
-    id.unraw() == name
-}
-pub(crate) fn path_is(path: &syn::Path, name: &str) -> bool {
-    path.get_ident().is_some_and(|id| ident_is(id, name))
 }
 fn doc_attr_literal_span(
     attr: &Attribute,
@@ -312,14 +305,6 @@ fn push_doc_literal_splice(nv: &syn::MetaNameValue, original: &str, out: &mut Ve
     let replacement = render_quoted_doc_literal(&rewritten);
     out.push(DocSplice { range, replacement });
 }
-#[must_use]
-pub(crate) fn is_cfg_attr(attr: &Attribute) -> bool {
-    match &attr.meta {
-        Meta::List(list) => path_is(&list.path, "cfg_attr"),
-        _ => false,
-    }
-}
-
 /// Rewrite mechanically-safe Rust item links in `doc_text`.
 ///
 /// Operates on the prose of a single doc-comment block (concatenated
@@ -648,7 +633,7 @@ mod rustdoc_link_idiom_tests {
     #[test]
     fn multibyte_utf8_survives_rewrite_pure() {
         let input = "see [Type] — also русский and 🦀";
-        let out = crate::rewrite_rustdoc_link_idioms(input);
+        let out = rewrite_rustdoc_link_idioms(input);
         assert_eq!(out, "see [`Type`] — also русский and 🦀");
     }
     #[test]
@@ -849,7 +834,6 @@ mod rustdoc_link_idiom_tests {
 #[cfg(test)]
 mod markdown_framing_grammar_tests {
     use super::rewrite_rustdoc_link_idioms as rw;
-    use crate::{WordCount, prose_word_count};
     fn unchanged(input: &str) {
         assert_eq!(rw(input), input, "expected byte-identical for {input:?}");
     }
@@ -1061,62 +1045,5 @@ mod markdown_framing_grammar_tests {
     #[test]
     fn g36_four_space_indent_interrupting_a_paragraph_is_prose() {
         assert_eq!(rw("para\n    [Type]"), "para\n    [`Type`]");
-    }
-    #[test]
-    fn g34_lint_path_fence_tracking_matches_the_rewriter() {
-        assert!(matches!(
-            prose_word_count("````\n```\none two\n````\nthree"),
-            WordCount::Balanced(1)
-        ));
-        assert!(matches!(
-            prose_word_count("    ```\none two"),
-            WordCount::Balanced(2)
-        ));
-    }
-    #[test]
-    fn g42_inline_code_spans_are_not_prose() {
-        assert!(matches!(
-            prose_word_count("one `two three four` five"),
-            WordCount::Balanced(2)
-        ));
-        assert!(matches!(
-            prose_word_count("a ``b ` c`` d"),
-            WordCount::Balanced(2)
-        ));
-    }
-    #[test]
-    fn g43_an_unclosed_span_leaves_its_delimiter_literal_prose() {
-        assert!(matches!(
-            prose_word_count("one `two three"),
-            WordCount::Balanced(3)
-        ));
-    }
-    #[test]
-    fn g44_a_span_open_across_lines_hides_both_lines_words() {
-        assert!(matches!(
-            prose_word_count("one `two\nthree` four"),
-            WordCount::Balanced(2)
-        ));
-    }
-    #[test]
-    fn g45_an_indented_code_block_is_not_prose() {
-        assert!(matches!(
-            prose_word_count("para\n\n    let x = 1;\n    let y = 2;\nafter"),
-            WordCount::Balanced(2)
-        ));
-    }
-    #[test]
-    fn g46_a_reference_definition_is_link_machinery_not_prose() {
-        assert!(matches!(
-            prose_word_count("[label]: https://example.com/a/b\ntext"),
-            WordCount::Balanced(1)
-        ));
-    }
-    #[test]
-    fn g47_an_unbalanced_fence_still_recounts_every_line_as_prose() {
-        assert!(matches!(
-            prose_word_count("```\none `two` three"),
-            WordCount::FailClosed(4)
-        ));
     }
 }

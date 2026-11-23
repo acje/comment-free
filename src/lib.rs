@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use syn::File;
 mod atomic;
+mod cfg;
 mod doc;
 mod markdown;
 mod record;
@@ -15,9 +16,6 @@ mod splice;
 mod strip;
 mod walk;
 use atomic::write_atomically;
-#[cfg(test)]
-pub(crate) use doc::prose_word_count;
-pub(crate) use doc::{CfgPredicate, cfg_predicate_args};
 pub use doc::{
     DocBudget, DocFinding, DocLintKind, DocLintOutcome, DocLintReport, DocUndecided,
     UndecidedCause, WordCount, doc_budget_source_file, doc_lint_file,

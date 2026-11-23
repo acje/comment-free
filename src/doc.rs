@@ -1,10 +1,12 @@
+use crate::cfg::{
+    CfgPredicate, CfgTruth, DocOrigin, cfg_predicate_args, fold_cfg_predicate, ident_is,
+    is_cfg_attr, path_is,
+};
 use crate::markdown::{
     BlockScan, CodeSpanState, LineFrame, opens_or_closes_fence, scan_code_spans,
 };
-use crate::splice::{ident_is, is_cfg_attr, path_is};
-use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Attribute, Meta, Token};
+use syn::{Attribute, Meta};
 /// Doc-comment word budget for the [`doc_lint_file`] linter.
 ///
 /// Examples are defined mechanically as fenced code blocks (` ``` ` or
@@ -371,11 +373,6 @@ fn decide_doc_budget(docs: &ItemDocs, budget: usize) -> DocVerdict {
         all_configurations: all,
     })
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DocOrigin {
-    Unconditional,
-    Conditional,
-}
 #[derive(Debug, Clone)]
 enum DocPayload {
     Text(String),
@@ -480,93 +477,6 @@ fn doc_value_payload(value: &syn::Expr) -> DocPayload {
         }) => DocPayload::Text(s.value()),
         _ => DocPayload::Unreadable,
     }
-}
-/// Truth value of a `cfg` predicate under a build configuration this
-/// crate has not been told, folded as far as the predicate's own
-/// boolean constants allow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CfgTruth {
-    Always,
-    Never,
-    Unresolved,
-}
-impl CfgTruth {
-    const fn and(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Never, _) | (_, Self::Never) => Self::Never,
-            (Self::Always, Self::Always) => Self::Always,
-            _ => Self::Unresolved,
-        }
-    }
-    const fn or(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Always, _) | (_, Self::Always) => Self::Always,
-            (Self::Never, Self::Never) => Self::Never,
-            _ => Self::Unresolved,
-        }
-    }
-    const fn negate(self) -> Self {
-        match self {
-            Self::Always => Self::Never,
-            Self::Never => Self::Always,
-            Self::Unresolved => Self::Unresolved,
-        }
-    }
-    const fn doc_origin(self) -> Option<DocOrigin> {
-        match self {
-            Self::Always => Some(DocOrigin::Unconditional),
-            Self::Unresolved => Some(DocOrigin::Conditional),
-            Self::Never => None,
-        }
-    }
-}
-/// One argument of a `cfg`-style predicate list, which rustc accepts as
-/// either a boolean literal or a `Meta` (path, `key = "value"`, or a
-/// `all`/`any`/`not` list). `syn::Meta` alone cannot hold `true` or
-/// `false`, because they are keywords rather than paths.
-pub(crate) enum CfgPredicate {
-    Bool(bool),
-    Meta(Box<Meta>),
-}
-impl syn::parse::Parse for CfgPredicate {
-    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
-        if input.peek(syn::LitBool) {
-            return Ok(Self::Bool(input.parse::<syn::LitBool>()?.value()));
-        }
-        Ok(Self::Meta(Box::new(input.parse()?)))
-    }
-}
-fn fold_cfg_predicate(predicate: &CfgPredicate) -> CfgTruth {
-    let meta = match predicate {
-        CfgPredicate::Bool(true) => return CfgTruth::Always,
-        CfgPredicate::Bool(false) => return CfgTruth::Never,
-        CfgPredicate::Meta(meta) => &**meta,
-    };
-    let Meta::List(list) = meta else {
-        return CfgTruth::Unresolved;
-    };
-    let Ok(inner) = cfg_predicate_args(list) else {
-        return CfgTruth::Unresolved;
-    };
-    if path_is(&list.path, "all") {
-        return inner
-            .iter()
-            .fold(CfgTruth::Always, |acc, m| acc.and(fold_cfg_predicate(m)));
-    }
-    if path_is(&list.path, "any") {
-        return inner
-            .iter()
-            .fold(CfgTruth::Never, |acc, m| acc.or(fold_cfg_predicate(m)));
-    }
-    match (path_is(&list.path, "not"), inner.first()) {
-        (true, Some(only)) if inner.len() == 1 => fold_cfg_predicate(only).negate(),
-        _ => CfgTruth::Unresolved,
-    }
-}
-pub(crate) fn cfg_predicate_args(
-    list: &syn::MetaList,
-) -> syn::Result<Punctuated<CfgPredicate, Token![,]>> {
-    list.parse_args_with(Punctuated::parse_terminated)
 }
 fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
     let Meta::List(list) = &attr.meta else {
@@ -842,7 +752,7 @@ fn impl_item_label_and_attrs(item: &syn::ImplItem) -> Option<(String, &[Attribut
 }
 #[cfg(test)]
 mod doc_lint_tests {
-    use super::{DocBudget, doc_lint_file};
+    use super::{DocBudget, WordCount, doc_lint_file, prose_word_count};
     fn file(src: &str) -> syn::File {
         syn::parse_file(src).expect("doc-lint fixture must parse as Rust source")
     }
@@ -1577,5 +1487,62 @@ pub enum E { #[doc = " w01 w02 w03 w04 w05"] One, #[doc =
         let findings = lint(&f, 40);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].item_label, "extern crate alloc");
+    }
+    #[test]
+    fn g34_lint_path_fence_tracking_matches_the_rewriter() {
+        assert!(matches!(
+            prose_word_count("````\n```\none two\n````\nthree"),
+            WordCount::Balanced(1)
+        ));
+        assert!(matches!(
+            prose_word_count("    ```\none two"),
+            WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g42_inline_code_spans_are_not_prose() {
+        assert!(matches!(
+            prose_word_count("one `two three four` five"),
+            WordCount::Balanced(2)
+        ));
+        assert!(matches!(
+            prose_word_count("a ``b ` c`` d"),
+            WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g43_an_unclosed_span_leaves_its_delimiter_literal_prose() {
+        assert!(matches!(
+            prose_word_count("one `two three"),
+            WordCount::Balanced(3)
+        ));
+    }
+    #[test]
+    fn g44_a_span_open_across_lines_hides_both_lines_words() {
+        assert!(matches!(
+            prose_word_count("one `two\nthree` four"),
+            WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g45_an_indented_code_block_is_not_prose() {
+        assert!(matches!(
+            prose_word_count("para\n\n    let x = 1;\n    let y = 2;\nafter"),
+            WordCount::Balanced(2)
+        ));
+    }
+    #[test]
+    fn g46_a_reference_definition_is_link_machinery_not_prose() {
+        assert!(matches!(
+            prose_word_count("[label]: https://example.com/a/b\ntext"),
+            WordCount::Balanced(1)
+        ));
+    }
+    #[test]
+    fn g47_an_unbalanced_fence_still_recounts_every_line_as_prose() {
+        assert!(matches!(
+            prose_word_count("```\none `two` three"),
+            WordCount::FailClosed(4)
+        ));
     }
 }

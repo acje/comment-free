@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-25
+
 ### Changed
 
 - Closed public enum vocabulary: `RewriteMode`, `DocLintKind`, `DocLintOutcome`,
@@ -56,5 +58,6 @@ this release provides, not a diff against an earlier tagged release.
 - `--rustdoc-link-idioms` is retained as a deprecated alias for `--rewrite` for
   one release.
 
-[Unreleased]: https://github.com/acje/comment-free/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/acje/comment-free/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/acje/comment-free/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/acje/comment-free/releases/tag/v0.2.0

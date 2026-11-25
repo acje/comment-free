@@ -130,8 +130,8 @@ already pinned to the legacy 0.2.0 baseline stay on that exact commit:
 cargo +1.100.0 install --git https://github.com/acje/comment-free --rev e45de7ef3b0fcd9a1ec299b9026b14fb5b0cf534 --locked comment-free
 ```
 
-New installs pin the `v0.2.0` release tag instead (§Consumption). The tag is
-the reproducible 0.2.0 release point; it is not equivalent to this older
+New installs pin the `v0.3.0` release tag instead (§Consumption). The tag is
+the reproducible 0.3.0 release point; it is not equivalent to this older
 legacy commit. No crates.io publication is authorised and `publish = false`
 stands.
 
@@ -179,15 +179,21 @@ out-of-line module ancestry are not evaluated, and `#[cfg(test)]` exclusion
 covers inline modules only: a `#[cfg(test)] mod tests;` file under `src/` is
 still scanned because analysis is per-file.
 
+- **Guards are proven by planted failure.** A changed guard MUST land with a
+  recorded four-step cycle — plant a violation, observe the failure, revert,
+  observe clean — with all four exit codes recorded and the planted violation
+  compiling. The closed-error guard (C4.5/C4.6, RST-0006) is proven by
+  `tools/tripwire-regression.sh`, wired into CI as a dedicated guard-proof job.
+
 ### Consumption
 Installed, not vendored:
 ```sh
-cargo +1.100.0 install --git https://github.com/acje/comment-free --rev v0.2.0 --locked comment-free
+cargo +1.100.0 install --git https://github.com/acje/comment-free --rev v0.3.0 --locked comment-free
 ```
 `cargo install --git` ignores this repo's `rust-toolchain.toml` and
 builds with the invoking toolchain, hence the explicit `+1.100.0` matching
-this checkout's compiler pin and CI configuration. `--rev v0.2.0` pins the
-tagged 0.2.0 release (see `CHANGELOG.md`) rather than the moving branch head.
+this checkout's compiler pin and CI configuration. `--rev v0.3.0` pins the
+tagged 0.3.0 release (see `CHANGELOG.md`) rather than the moving branch head.
 
 ### Delivery
 Use `main` as the sole local and remote branch. Do not create feature branches

@@ -39,14 +39,14 @@ files.
 ## Install
 
 ```sh
-cargo +1.100.0 install --git https://github.com/acje/comment-free --rev v0.2.0 --locked comment-free
+cargo +1.100.0 install --git https://github.com/acje/comment-free --rev v0.3.0 --locked comment-free
 ```
 
 The `+1.100.0` is load-bearing. `cargo install --git` **ignores the source
 repository's `rust-toolchain.toml`** and builds with the *invoking*
 toolchain; the explicit `+1.100.0` matches this checkout's compiler pin
 and CI configuration rather than using an older or newer default
-toolchain. `--rev v0.2.0` pins the tagged 0.2.0 release rather than the moving
+toolchain. `--rev v0.3.0` pins the tagged 0.3.0 release rather than the moving
 branch head, so the installed source is reproducible. `--locked` is likewise
 mandatory: it uses the committed `Cargo.lock`, so you get the dependency
 graph CI tested.
@@ -168,7 +168,7 @@ Admission follows native `PathBuf` order, not lossy displayed-path order.
 Hints come only from admitted findings, at most 50, highest overshoot first;
 equal overshoots retain path then report order. Summary fields distinguish
 total/shown/hidden warning files, findings and undecided items, and report
-the resolved scope policy. Package 0.2.0 emits doc-lint and diagnostic v3;
+the resolved scope policy. Package 0.3.0 emits doc-lint and diagnostic v3;
 `rewrite_summary` stays v2. See the record specification for migration.
 
 The synchronous lint path retains sorted paths (items plus path bytes and

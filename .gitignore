@@ -3,4 +3,5 @@
 .beads*
 *.pem
 /graphify-out/
+.DS_Store
 /.repowise/

@@ -1,14 +1,13 @@
-#![expect(
-    dead_code,
-    reason = "each integration binary uses a subset of the shared fixture helpers"
-)]
-
 pub(crate) use std::fs;
 pub(crate) use std::path::Path;
 pub(crate) use std::process::Command;
 pub(crate) const fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_comment-free")
 }
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn run(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")
@@ -16,6 +15,10 @@ pub(crate) fn run(root: &Path) -> std::process::Output {
         .output()
         .expect("failed to spawn comment-free")
 }
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn run_dry(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")
@@ -24,6 +27,10 @@ pub(crate) fn run_dry(root: &Path) -> std::process::Output {
         .output()
         .expect("failed to spawn comment-free")
 }
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn assert_pending_changes(out: &std::process::Output, context: &str) {
     assert_eq!(
         out.status.code(),
@@ -37,6 +44,10 @@ pub(crate) fn write(dir: &Path, name: &str, content: &str) {
     fs::create_dir_all(&src).expect("mkdir src");
     fs::write(src.join(name), content).expect("write fixture");
 }
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn read(dir: &Path, name: &str) -> String {
     fs::read_to_string(dir.join("src").join(name)).expect("read fixture")
 }
@@ -77,12 +88,20 @@ impl Record {
             Field::Number(_) | Field::Bool(_) => panic!("field `{key}` is not a string"),
         }
     }
+    #[allow(
+        dead_code,
+        reason = "this record-parser internal is live only in the integration binaries that exercise record parsing"
+    )]
     pub(crate) fn number(&self, key: &str) -> u32 {
         match self.get(key) {
             Field::Number(n) => *n,
             Field::Text(_) | Field::Bool(_) => panic!("field `{key}` is not a number"),
         }
     }
+    #[allow(
+        dead_code,
+        reason = "this record-parser internal is live only in the integration binaries that exercise record parsing"
+    )]
     pub(crate) fn boolean(&self, key: &str) -> bool {
         match self.get(key) {
             Field::Bool(b) => *b,
@@ -92,6 +111,10 @@ impl Record {
     pub(crate) fn name(&self) -> &str {
         self.text("record")
     }
+    #[allow(
+        dead_code,
+        reason = "this record-parser internal is live only in the integration binaries that exercise record parsing"
+    )]
     pub(crate) fn keys(&self) -> Vec<&str> {
         self.fields.iter().map(|(k, _)| k.as_str()).collect()
     }
@@ -357,6 +380,10 @@ pub(crate) fn one_record(stream: &str, name: &str) -> Record {
     found.remove(0)
 }
 
+#[allow(
+    dead_code,
+    reason = "this record-parser helper is live only in the integration binaries that exercise record parsing"
+)]
 pub(crate) fn error_records(stream: &str, kind: &str) -> Vec<Record> {
     records_named(stream, "run_error")
         .into_iter()
@@ -364,6 +391,10 @@ pub(crate) fn error_records(stream: &str, kind: &str) -> Vec<Record> {
         .collect()
 }
 
+#[allow(
+    dead_code,
+    reason = "this record-parser helper is live only in the integration binaries that exercise record parsing"
+)]
 pub(crate) fn one_error(stream: &str, kind: &str) -> Record {
     let mut found = error_records(stream, kind);
     assert_eq!(
@@ -374,6 +405,10 @@ pub(crate) fn one_error(stream: &str, kind: &str) -> Record {
     found.remove(0)
 }
 
+#[allow(
+    dead_code,
+    reason = "this record-parser helper is live only in the integration binaries that exercise record parsing"
+)]
 pub(crate) fn rewritten_paths(stream: &str) -> Vec<String> {
     records_named(stream, "rewrite_file")
         .into_iter()
@@ -381,12 +416,20 @@ pub(crate) fn rewritten_paths(stream: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn run_lint(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg(root)
         .output()
         .expect("failed to spawn comment-free")
 }
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn run_lint_budget(root: &Path, budget: usize) -> std::process::Output {
     Command::new(bin())
         .arg(format!("--doc-max-words={budget}"))
@@ -395,6 +438,10 @@ pub(crate) fn run_lint_budget(root: &Path, budget: usize) -> std::process::Outpu
         .expect("failed to spawn comment-free")
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn prose_words(prefix: &str, count: usize) -> String {
     let mut out = String::new();
     for n in 1..=count {
@@ -405,6 +452,10 @@ pub(crate) fn prose_words(prefix: &str, count: usize) -> String {
     out
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn doc_prose_lines(count: usize) -> String {
     let mut out = String::new();
     for i in 1..=count {
@@ -415,6 +466,10 @@ pub(crate) fn doc_prose_lines(count: usize) -> String {
     out
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn manifest_policy_fixture(td: &Path) -> std::path::PathBuf {
     let repo = td.join("repo");
     fs::create_dir_all(repo.join("src/module")).expect("mkdir repo/src/module");
@@ -422,6 +477,10 @@ pub(crate) fn manifest_policy_fixture(td: &Path) -> std::path::PathBuf {
     repo
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn run_idioms(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")
@@ -430,6 +489,10 @@ pub(crate) fn run_idioms(root: &Path) -> std::process::Output {
         .output()
         .expect("failed to spawn comment-free")
 }
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn run_idioms_dry(root: &Path) -> std::process::Output {
     Command::new(bin())
         .arg("--rewrite")
@@ -441,6 +504,10 @@ pub(crate) fn run_idioms_dry(root: &Path) -> std::process::Output {
 }
 
 #[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn make_unreadable(dir: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).expect("chmod 000");
@@ -451,17 +518,33 @@ pub(crate) fn make_unreadable(dir: &Path) {
     );
 }
 #[cfg(unix)]
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn make_readable(dir: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).expect("chmod 755");
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) const FORGED: &str = "{\"record\":\"forged\",\"v\":2}";
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn hostile_root_name() -> String {
     format!("hostile\n{FORGED}")
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn assert_no_forged_record_line(stream: &str, label: &str) {
     for line in stream.lines().filter(|l| l.starts_with('{')) {
         assert!(
@@ -472,6 +555,10 @@ pub(crate) fn assert_no_forged_record_line(stream: &str, label: &str) {
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn run_argv(args: &[&str]) -> std::process::Output {
     Command::new(bin())
         .args(args)
@@ -479,6 +566,10 @@ pub(crate) fn run_argv(args: &[&str]) -> std::process::Output {
         .expect("failed to spawn comment-free")
 }
 
+#[allow(
+    dead_code,
+    reason = "this shared fixture helper is used by only some integration binaries, so it is dead in the others"
+)]
 pub(crate) fn hostile_argv_fragment() -> String {
     format!("hostile\n{FORGED}\n")
 }

@@ -402,6 +402,19 @@ fn safe_idiom_path_rewrites_nested_cfg_attr_doc() {
 }
 
 #[test]
+fn safe_idiom_path_rewrites_never_gated_cfg_attr_doc() {
+    let td = tempfile::tempdir().unwrap();
+    let original = "#[cfg_attr(any(), doc = \" see [Type](Type) here\")]\npub struct Type;\n";
+    write(td.path(), "a.rs", original);
+    run_idioms(td.path());
+    let out = read(td.path(), "a.rs");
+    assert_eq!(
+        out, "#[cfg_attr(any(), doc = \" see [`Type`] here\")]\npub struct Type;\n",
+        "a Never-gated cfg_attr doc-link idiom must still be rewritten; the rewrite consumer must map every descriptor and never filter on CfgTruth; got:\n{out}"
+    );
+}
+
+#[test]
 fn safe_idiom_path_is_idempotent() {
     let td = tempfile::tempdir().unwrap();
     let original = "/// see [Type](Type) and [`Other`]\npub struct Type;\npub struct Other;\n";

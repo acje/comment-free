@@ -1,6 +1,4 @@
-use crate::cfg::{
-    CfgPredicate, CfgTruth, cfg_predicate_args, fold_cfg_predicate, ident_is, is_cfg_attr, path_is,
-};
+use crate::cfg::{CfgTruth, cfg_attr_doc_name_values, ident_is, is_cfg_attr, path_is};
 use crate::markdown::{
     BlockScan, CodeSpanState, LineFrame, opens_or_closes_fence, scan_code_spans,
 };
@@ -486,51 +484,21 @@ fn doc_value_payload(value: &syn::Expr) -> DocPayload {
     }
 }
 fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
-    let Meta::List(list) = &attr.meta else {
-        return;
-    };
-    if !path_is(&list.path, "cfg_attr") {
-        return;
+    for doc in cfg_attr_doc_name_values(attr) {
+        let Some(origin) = doc_origin(doc.truth()) else {
+            continue;
+        };
+        out.push(DocPart {
+            origin,
+            payload: doc_value_payload(&doc.name_value().value),
+        });
     }
-    collect_cfg_attr_list_doc_parts(list, CfgTruth::Always, out);
 }
 const fn doc_origin(truth: CfgTruth) -> Option<DocOrigin> {
     match truth {
         CfgTruth::Always => Some(DocOrigin::Unconditional),
         CfgTruth::Unresolved => Some(DocOrigin::Conditional),
         CfgTruth::Never => None,
-    }
-}
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "syn::Meta is an external vocabulary; only doc name-values and nested cfg_attr lists contribute parts"
-)]
-fn collect_cfg_attr_list_doc_parts(list: &syn::MetaList, outer: CfgTruth, out: &mut Vec<DocPart>) {
-    let Ok(args) = cfg_predicate_args(list) else {
-        return;
-    };
-    let mut args = args.into_iter();
-    let Some(predicate) = args.next() else {
-        return;
-    };
-    let truth = outer.and(fold_cfg_predicate(&predicate));
-    let Some(origin) = doc_origin(truth) else {
-        return;
-    };
-    for arg in args {
-        let CfgPredicate::Meta(meta) = arg else {
-            continue;
-        };
-        match &*meta {
-            Meta::NameValue(nv) if path_is(&nv.path, "doc") => out.push(DocPart {
-                origin,
-                payload: doc_value_payload(&nv.value),
-            }),
-            Meta::List(inner) if path_is(&inner.path, "cfg_attr") => {
-                collect_cfg_attr_list_doc_parts(inner, truth, out);
-            }
-            _ => {}
-        }
     }
 }
 fn prose_word_count(doc_text: &str) -> WordCount {

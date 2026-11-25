@@ -100,3 +100,72 @@ pub(crate) fn is_cfg_attr(attr: &Attribute) -> bool {
         _ => false,
     }
 }
+/// One `doc = ...` name-value found inside a `cfg_attr` argument list,
+/// paired with the folded truth of the predicates gating it.
+#[derive(Debug, Clone)]
+pub(crate) struct CfgAttrDoc {
+    truth: CfgTruth,
+    name_value: syn::MetaNameValue,
+}
+impl CfgAttrDoc {
+    pub(crate) const fn truth(&self) -> CfgTruth {
+        self.truth
+    }
+    pub(crate) const fn name_value(&self) -> &syn::MetaNameValue {
+        &self.name_value
+    }
+}
+/// Every `doc = ...` name-value in the `cfg_attr` attribute `attr`'s
+/// argument list, nested `cfg_attr` lists included, depth-first in
+/// argument order.
+///
+/// Empty when `attr` is not a `cfg_attr` list attribute. A `Never`
+/// descriptor is yielded rather than pruned, because only the consumer
+/// knows whether gating applies to its use.
+#[must_use]
+pub(crate) fn cfg_attr_doc_name_values(attr: &Attribute) -> Vec<CfgAttrDoc> {
+    if !is_cfg_attr(attr) {
+        return Vec::new();
+    }
+    let Meta::List(list) = &attr.meta else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    push_cfg_attr_list_doc_name_values(list, CfgTruth::Always, &mut out);
+    out
+}
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "syn::Meta is an external vocabulary; only doc name-values and nested cfg_attr lists carry doc payloads"
+)]
+fn push_cfg_attr_list_doc_name_values(
+    list: &syn::MetaList,
+    outer: CfgTruth,
+    out: &mut Vec<CfgAttrDoc>,
+) {
+    let Ok(args) = cfg_predicate_args(list) else {
+        return;
+    };
+    let mut args = args.into_iter();
+    let Some(predicate) = args.next() else {
+        return;
+    };
+    let truth = outer.and(fold_cfg_predicate(&predicate));
+    for arg in args {
+        let CfgPredicate::Meta(meta) = arg else {
+            continue;
+        };
+        match &*meta {
+            Meta::List(inner) if path_is(&inner.path, "cfg_attr") => {
+                push_cfg_attr_list_doc_name_values(inner, truth, out);
+            }
+            Meta::NameValue(name_value) if path_is(&name_value.path, "doc") => {
+                out.push(CfgAttrDoc {
+                    truth,
+                    name_value: name_value.clone(),
+                });
+            }
+            _ => {}
+        }
+    }
+}

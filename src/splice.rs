@@ -1,4 +1,4 @@
-use crate::cfg::{CfgPredicate, cfg_predicate_args, is_cfg_attr, path_is};
+use crate::cfg::{cfg_attr_doc_name_values, path_is};
 use crate::markdown::{
     BlockScan, CodeSpanState, LineFrame, advance_span, backtick_run_len, find_matching_bracket,
     reference_definition_label, span_after_run,
@@ -266,39 +266,8 @@ fn render_quoted_doc_literal(value: &str) -> String {
 }
 fn collect_cfg_attr_doc_splices(attrs: &[Attribute], original: &str, out: &mut Vec<DocSplice>) {
     for attr in attrs {
-        if !is_cfg_attr(attr) {
-            continue;
-        }
-        let Meta::List(list) = &attr.meta else {
-            continue;
-        };
-        collect_cfg_attr_list_doc_splices(list, original, out);
-    }
-}
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "syn::Meta is an external vocabulary; only doc name-values and nested cfg_attr lists carry spliced literals"
-)]
-fn collect_cfg_attr_list_doc_splices(
-    list: &syn::MetaList,
-    original: &str,
-    out: &mut Vec<DocSplice>,
-) {
-    let Ok(args) = cfg_predicate_args(list) else {
-        return;
-    };
-    for arg in args.iter().skip(1) {
-        let CfgPredicate::Meta(meta) = arg else {
-            continue;
-        };
-        match &**meta {
-            Meta::List(inner) if path_is(&inner.path, "cfg_attr") => {
-                collect_cfg_attr_list_doc_splices(inner, original, out);
-            }
-            Meta::NameValue(nv) if path_is(&nv.path, "doc") => {
-                push_doc_literal_splice(nv, original, out);
-            }
-            _ => {}
+        for doc in cfg_attr_doc_name_values(attr) {
+            push_doc_literal_splice(doc.name_value(), original, out);
         }
     }
 }

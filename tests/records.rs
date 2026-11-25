@@ -51,7 +51,10 @@ fn public_summary_metadata_has_only_schema_values() {
 }
 
 #[test]
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "pins the legacy v2 lint_summary_record contract; this regression test is the only source of v=2 records"
+)]
 fn legacy_summary_helper_keeps_its_legacy_version() {
     let record = parse_record(&comment_free::lint_summary_record(1, 0, 0, 0)).unwrap();
     assert_eq!(record.number("v"), 2);

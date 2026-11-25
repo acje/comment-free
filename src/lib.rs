@@ -19,7 +19,10 @@ pub use doc::{
     DocBudget, DocFinding, DocLintKind, DocLintOutcome, DocLintReport, DocUndecided,
     UndecidedCause, WordCount, doc_budget_source_file, doc_lint_file,
 };
-#[allow(deprecated)]
+#[expect(
+    deprecated,
+    reason = "legacy v2 lint_summary record kept re-exported for consumers pinned to the 0.2.0 baseline; new callers use LintTotals::record"
+)]
 pub use record::lint_summary_record;
 pub use record::{
     DIAGNOSTIC_RECORD_GRAMMAR, DIAGNOSTIC_RECORD_VERSION, DOC_LINT_RECORD_GRAMMAR,

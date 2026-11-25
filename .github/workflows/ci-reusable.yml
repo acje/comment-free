@@ -14,19 +14,6 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  adr-lint:
-    name: ADR lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-        with:
-          toolchain: 1.100.0
-      - name: Install adr-fmt
-        run: cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --locked adr-fmt
-      - name: Lint ADRs
-        run: adr-fmt --lint
-
   build-test-lint:
     name: build, test, lint (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -55,6 +42,55 @@ jobs:
         run: cargo run --quiet --locked -- --rewrite --dry-run .
         if: always()
 
+  # Tripwire: ban crate/module-level inner `dead_code` suppression in library
+  # and binary source (`src/**`). A blanket `#![allow(dead_code)]` (or
+  # `#![expect(dead_code)]`, or a `cfg_attr`-wrapped inner form) silences the
+  # unused-code lint for an entire module and masks genuinely dead code. Targeted
+  # OUTER item-level suppressions (`#[allow(dead_code, reason = "...")]`,
+  # `#[expect(dead_code, ...)]`, `#[cfg_attr(..., allow(dead_code, ...))]`)
+  # remain permitted: they are item-local and reasoned. Scope is `src/` only.
+  dead-code-inner-suppression-tripwire:
+    name: ban module-level dead_code suppression (src)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: ban inner #![allow/expect(dead_code)] in crate src
+        run: |
+          set -euo pipefail
+          offenders=$(grep -RIn --include='*.rs' -E \
+            '#!\[.*(allow|expect)\(.*\bdead_code\b' \
+            src || true)
+          if [ -n "$offenders" ]; then
+            echo "::error::crate/module-level inner dead_code suppression is banned in src"
+            echo "$offenders"
+            exit 1
+          fi
+
+  # In-repo ratchet for comment-free's closed error enum policy (C4.5/C4.6),
+  # mirroring adr-fmt's gate: it fails on a new `#[non_exhaustive]` public
+  # error/outcome enum (tests/closed_error_policy.rs, RST-0006) and on a stale
+  # baseline entry, plus the `forbid(unsafe_code)` crate-root gates (RST-0005).
+  closed-error-and-unsafe-gate:
+    name: closed-error ratchet + forbid-unsafe gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.100.0
+      - run: cargo test --locked --test closed_error_policy
+      - name: enforce #![forbid(unsafe_code)] in every crate root
+        run: |
+          set -euo pipefail
+          grep -q 'forbid(unsafe_code)' src/lib.rs || {
+            echo "::error::forbid-unsafe-total: src/lib.rs lacks #![forbid(unsafe_code)] (RST-0005)" >&2
+            exit 1
+          }
+          grep -q 'forbid(unsafe_code)' src/main.rs || {
+            echo "::error::forbid-unsafe-total: src/main.rs lacks #![forbid(unsafe_code)] (RST-0005)" >&2
+            exit 1
+          }
+
   supply-chain:
     name: supply-chain (audit + deny)
     runs-on: ubuntu-latest
@@ -70,3 +106,23 @@ jobs:
         if: always()
       - run: cargo deny check
         if: always()
+
+  # CI/local parity: this job runs the two entry points a developer runs and
+  # nothing else, so green here means the repository's own gates passed on this
+  # commit — not a CI-only reimplementation of them. It absorbs the repository
+  # gate (`sh scripts/verify.sh`) plus the ADR lint install+lint step, so this
+  # is the single CI/local parity gate.
+  boundary-gate:
+    name: repository gate (verify.sh + adr lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.100.0
+          components: clippy, rustfmt
+      - run: sh scripts/verify.sh
+      - name: Install adr-fmt
+        run: cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --locked adr-fmt
+      - name: Lint ADRs
+        run: adr-fmt --lint

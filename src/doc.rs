@@ -470,18 +470,15 @@ fn doc_payload(attr: &Attribute) -> Option<DocPayload> {
     }
     Some(doc_value_payload(&nv.value))
 }
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "syn::Expr is a non-exhaustive external vocabulary; only a string-literal expression carries doc prose this tool can read"
-)]
 fn doc_value_payload(value: &syn::Expr) -> DocPayload {
-    match value {
-        syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(s),
-            ..
-        }) => DocPayload::Text(s.value()),
-        _ => DocPayload::Unreadable,
-    }
+    let syn::Expr::Lit(syn::ExprLit {
+        lit: syn::Lit::Str(s),
+        ..
+    }) = value
+    else {
+        return DocPayload::Unreadable;
+    };
+    DocPayload::Text(s.value())
 }
 fn collect_cfg_attr_doc_parts(attr: &Attribute, out: &mut Vec<DocPart>) {
     for doc in cfg_attr_doc_name_values(attr) {

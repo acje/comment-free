@@ -89,16 +89,12 @@ pub(crate) fn cfg_predicate_args(
 ) -> syn::Result<Punctuated<CfgPredicate, Token![,]>> {
     list.parse_args_with(Punctuated::parse_terminated)
 }
-#[expect(
-    clippy::wildcard_enum_match_arm,
-    reason = "syn::Meta is an external vocabulary; only a list meta spells cfg_attr"
-)]
 #[must_use]
 pub(crate) fn is_cfg_attr(attr: &Attribute) -> bool {
-    match &attr.meta {
-        Meta::List(list) => path_is(&list.path, "cfg_attr"),
-        _ => false,
-    }
+    let Meta::List(list) = &attr.meta else {
+        return false;
+    };
+    path_is(&list.path, "cfg_attr")
 }
 /// One `doc = ...` name-value found inside a `cfg_attr` argument list,
 /// paired with the folded truth of the predicates gating it.

@@ -143,5 +143,4 @@ jobs:
       - run: sh scripts/verify.sh
       - name: Install adr-fmt
         run: cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --locked adr-fmt
-      - name: Lint ADRs
-        run: adr-fmt --lint
+      - run: bash scripts/adr-lint-gate.sh

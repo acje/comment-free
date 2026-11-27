@@ -318,9 +318,8 @@ installed revision, lint findings are advisory warnings and exit 0; they do
 not fail CI. Configuration or infrastructure errors can exit 1. This is
 not a zero-warning enforcement gate: inspect the diagnostics too.
 
-Validation on 2026-09-06 used installed canonical `adr-fmt` 0.3.0 at revision
-`83fc20bd2cbe0976388ae74193226750d4afc471`, not the revision CI installed at
-the time.
+Validation used the installed canonical `adr-fmt` resolved from the default
+branch, matching both the CI job and the local install command above.
 Lint exited 0 with four L015 advisories for CF-0003 through CF-0006: their
 first reference is the root while later references include same-domain
 non-root records. Reference order and parentage are preserved; the five

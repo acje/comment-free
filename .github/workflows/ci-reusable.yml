@@ -126,11 +126,22 @@ jobs:
       - run: cargo deny check
         if: always()
 
+  # Guard-proof job for the ADR warning-threshold gate: pins the execution
+  # contract of scripts/adr-lint-gate.sh (0 at/under, 1 over, 2 no verdict)
+  # against a stub lint producer, so a false-clean cannot let a regression land
+  # while this job stays green. Kept separate from boundary-gate (mirrors
+  # adr-fmt's separate guard-proof job pattern).
+  adr-lint-gate-test:
+    name: adr-lint-gate contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash scripts/adr-lint-gate-test.sh
+
   # CI/local parity: this job runs the two entry points a developer runs and
   # nothing else, so green here means the repository's own gates passed on this
-  # commit — not a CI-only reimplementation of them. It absorbs the repository
-  # gate (`sh scripts/verify.sh`) plus the ADR lint install+lint step, so this
-  # is the single CI/local parity gate.
+  # commit — not a CI-only reimplementation of them. The ADR lint gate
+  # self-provisions adr-fmt, so no separate install step is needed here.
   boundary-gate:
     name: repository gate (verify.sh + adr lint)
     runs-on: ubuntu-latest
@@ -141,6 +152,7 @@ jobs:
           toolchain: 1.100.0
           components: clippy, rustfmt
       - run: sh scripts/verify.sh
-      - name: Install adr-fmt
-        run: cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --locked adr-fmt
+      # `adr-lint-gate.sh` carries a bash shebang and uses bash-only constructs
+      # (`[[ =~ ]]`, `BASH_SOURCE`), so it is invoked through `bash`: ubuntu's
+      # `sh` is dash, where it cannot run and reports exit 2 (no verdict).
       - run: bash scripts/adr-lint-gate.sh

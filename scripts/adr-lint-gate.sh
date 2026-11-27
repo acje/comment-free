@@ -12,6 +12,11 @@
 # Tune:    ADR_LINT_MAX_WARNINGS=12 scripts/adr-lint-gate.sh
 # Test:    ADR_LINT_CMD injects a stub lint producer; see
 #          scripts/adr-lint-gate-test.sh for the pinned contract.
+# Bootstrap: adr-fmt is self-provisioned on first use — if it is not on
+#          PATH, the gate installs it (cargo +1.100.0 install --git
+#          https://github.com/Mattilsynet/adr-fmt --locked adr-fmt) before
+#          invoking the lint. The gate-test injects ADR_LINT_CMD stubs and
+#          never runs adr-fmt, so the provision is skipped there.
 #
 # Exit 0 = at or under threshold. Exit 1 = over threshold.
 # Exit 2 = the gate could not obtain a verdict (lint failed, the
@@ -42,6 +47,16 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+
+# Self-provision adr-fmt: the default lint_cmd invokes the external adr-fmt
+# binary, so the gate must work on a fresh checkout without a manual install —
+# this keeps the boundary-gate's two entry points self-sufficient. The
+# gate-test injects ADR_LINT_CMD stubs and never runs adr-fmt, so the
+# provision is skipped when ADR_LINT_CMD is set.
+if [ -z "${ADR_LINT_CMD:-}" ] && ! command -v adr-fmt >/dev/null 2>&1; then
+    echo "adr-lint-gate: adr-fmt not found on PATH; installing from Mattilsynet/adr-fmt (--locked)" >&2
+    cargo +1.100.0 install --git https://github.com/Mattilsynet/adr-fmt --locked adr-fmt
+fi
 
 if ! output="$(eval "$lint_cmd" 2>&1)"; then
     printf '%s\n' "$output" >&2

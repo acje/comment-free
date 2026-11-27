@@ -51,9 +51,9 @@ High-assurance testing techniques—such as property-based testing (proptest), f
   comment-hygiene tool. Default mode is read-only and lints doc-comment
   length; `--rewrite` strips non-doc comments and canonicalises rustdoc
   link idioms in place. See `README.md` for modes and exit codes.
-- Exit codes: this tool uses a dedicated six-value taxonomy, not the
-  fleet tri-state 0/1/2 shape. The authoritative meanings, as documented
-  in `src/main.rs` `--help`, are:
+- Exit codes (default lint/rewrite modes): this tool uses a dedicated
+  six-value taxonomy, not the fleet tri-state 0/1/2 shape. The
+  authoritative meanings, as documented in `src/main.rs` `--help`, are:
   - `0`: clean — every doc payload under ROOT was read and every one
     of them was decided against the budget.
   - `1`: catastrophic / unmapped IO error, or exact-counter overflow.
@@ -69,6 +69,9 @@ High-assurance testing techniques—such as property-based testing (proptest), f
   - `5`: per-file parse/IO errors, or directory-traversal errors,
     observed during processing (both modes); each is reported as a
     `run_error` record naming its kind.
+  The `--check-doc-budget` gate is a separate gate that uses the fleet
+  tri-state: `0` pass, `1` enforced breach, `2` unknown/error (see
+  §Rustdoc Budget Gate).
 - Stream separation: structured machine-readable findings (JSON Lines)
   stream to `stdout`; operational telemetry, diagnostic logs, and error traces
   route to `stderr`.

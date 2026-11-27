@@ -51,11 +51,25 @@ High-assurance testing techniques—such as property-based testing (proptest), f
   comment-hygiene tool. Default mode is read-only and lints doc-comment
   length; `--rewrite` strips non-doc comments and canonicalises rustdoc
   link idioms in place. See `README.md` for modes and exit codes.
-- Exit codes adhere strictly to the fleet tri-state taxonomy:
-  - `0`: clean pass / compliant / all assertions verified.
-  - `1`: domain defect / violation / finding flagged.
-  - `2`: unknown / environmental error / missing permission / indeterminate.
-- Stream separation: structured machine-readable findings (TSV, JSON Lines)
+- Exit codes: this tool uses a dedicated six-value taxonomy, not the
+  fleet tri-state 0/1/2 shape. The authoritative meanings, as documented
+  in `src/main.rs` `--help`, are:
+  - `0`: clean — every doc payload under ROOT was read and every one
+    of them was decided against the budget.
+  - `1`: catastrophic / unmapped IO error, or exact-counter overflow.
+  - `2`: invalid CLI arguments (clap rejection).
+  - `3`: `--rewrite --dry-run` previewed at least one pending change,
+    so the tree is not already comment-free. Write mode is not a check
+    and exits 0 whatever it rewrote; exit 5 outranks exit 3.
+  - `4`: the tree did not come back clean in default mode: at least one
+    doc-lint finding, or at least one undecided item. An undecided item
+    is NOT a finding — read `findings` and `undecided` in `lint_summary`
+    to tell them apart. A run that could not see everything does not
+    report exit 0, because that code means clean.
+  - `5`: per-file parse/IO errors, or directory-traversal errors,
+    observed during processing (both modes); each is reported as a
+    `run_error` record naming its kind.
+- Stream separation: structured machine-readable findings (JSON Lines)
   stream to `stdout`; operational telemetry, diagnostic logs, and error traces
   route to `stderr`.
 - This tool is the mechanical enforcement surface for the fleet house
